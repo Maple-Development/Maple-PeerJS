@@ -20,6 +20,7 @@ import { createPublicGetRouter } from './publicGet/get.js';
 import { createFriendsRouter } from './user/friends.js';
 import { FriendshipManager } from './user/friendships.js';
 import { ProfileManager } from './user/profiles.js';
+import { PeerManager } from './iomanager/peers.js';
 
 export function createMaple(
 	config: Config,
@@ -40,7 +41,8 @@ export function createMaple(
 	const profiles = new ProfileManager(db);
 	const friendships = new FriendshipManager(db, io);
 	const playback = new PlaybackManager(io, profiles, friendships, links);
-	const services = { db, io, auth, links, profiles, friendships, playback };
+	const peers = new PeerManager(io, db);
+	const services = { db, io, auth, links, profiles, friendships, playback, peers };
 	app.set('trust proxy', config.trustedProxies);
 	app.use((req, res, next) => {
 		res.set('Cache-Control', 'private, no-store');

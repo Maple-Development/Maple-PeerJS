@@ -8,6 +8,7 @@ import type {
 	RpcUpdate
 } from '$shared/types/playback';
 import type { ListeningProfile, OwnProfile } from '$shared/types/profile';
+import type { PeerClientEvents, PeerServerEvents } from '$shared/types/peer';
 
 export type { FriendRequests, Profile } from '$shared/types/profile';
 export type { Listening, ListeningVisibility } from '$shared/types/playback';
@@ -18,7 +19,7 @@ export type Friend = ListeningProfile;
 type Reply = (result: PlaybackReply) => void;
 
 export type MapleSocket = Socket<
-	{
+	PeerServerEvents & {
 		friendRequest: (data: { id: string }) => void;
 		friendRemoved: (data: { id: string }) => void;
 		listening: (data: { id: string; listening: Listening | null }) => void;
@@ -27,7 +28,7 @@ export type MapleSocket = Socket<
 		requestAccepted: (data: { id: string; message: string }) => void;
 		acceptedRequest: (data: { id: string; message: string }) => void;
 	},
-	{
+	PeerClientEvents & {
 		playbackStart: (data: PlaybackStart, reply: Reply) => void;
 		playbackUpdate: (data: PlaybackUpdate, reply: Reply) => void;
 		playbackStop: (data: PlaybackStop, reply: Reply) => void;

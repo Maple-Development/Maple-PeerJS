@@ -54,6 +54,7 @@ export function setupSocket(services: Services, origins: string[]) {
 		if (!sessionActive()) return;
 		void client.join([accountRoom(id), sessionRoom(sessionId)]);
 		playback.connect(client);
+		services.peers.connect(client)
 
 		function handle<T>(
 			event: string,

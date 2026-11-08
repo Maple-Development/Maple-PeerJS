@@ -1,16 +1,17 @@
 import type { Server, Socket } from 'socket.io';
 import type { SessionUser } from './auth.js';
 import type { Listening, PlaybackReply, RpcUpdate } from './playback.js';
+import type { PeerClientEvents, PeerServerEvents } from './peer.js';
 
 type Reply = (result: PlaybackReply) => void;
 
-export interface ClientEvents {
+export interface ClientEvents extends PeerClientEvents {
 	playbackStart: (data: unknown, reply?: Reply) => void;
 	playbackUpdate: (data: unknown, reply?: Reply) => void;
 	playbackStop: (data: unknown, reply?: Reply) => void;
 }
 
-export interface ServerEvents {
+export interface ServerEvents extends PeerServerEvents {
 	friendRequest: (data: { id: string }) => void;
 	friendRemoved: (data: { id: string }) => void;
 	listening: (data: { id: string; listening: Listening | null }) => void;

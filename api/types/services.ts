@@ -1,5 +1,6 @@
 import type { ArtworkLinks } from '../auth/artworkLinks.js';
 import type { Auth } from '../auth/auth.js';
+import type { PeerManager } from '../iomanager/peers.js';
 import type { PlaybackManager } from '../iomanager/playback.js';
 import type { Database } from '../storage/sqlite.js';
 import type { FriendshipManager } from '../user/friendships.js';
@@ -14,4 +15,5 @@ export interface Services {
 	profiles: ProfileManager;
 	friendships: FriendshipManager;
 	playback: PlaybackManager;
+	peers: PeerManager
 }
