@@ -49,7 +49,7 @@ export function setupSocket(services: Services, origins: string[]) {
 
 	io.on('connection', (client) => {
 		const { id, sessionId } = client.data.user;
-		console.log('[SOCKET] User connected: ' + id);
+		console.log(`[SOCKET] User connected: ${id} (socket ${client.id})`);
 		const sessionActive = watchSession(services, client);
 		if (!sessionActive()) return;
 		void client.join([accountRoom(id), sessionRoom(sessionId)]);
@@ -97,7 +97,7 @@ export function setupSocket(services: Services, origins: string[]) {
 
 		client.on('disconnect', () => {
 			playback.disconnect(client);
-			console.log('[SOCKET] User disconnected: ' + id);
+			console.log(`[SOCKET] User disconnected: ${id} (socket ${client.id})`);
 		});
 	});
 }
