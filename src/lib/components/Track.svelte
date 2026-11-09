@@ -12,7 +12,8 @@
 	import { confirmDialog } from '$lib/confirm.svelte';
 	import DeviceList from '$lib/components/DeviceList.svelte';
 	import type { OwnDevice } from '$shared/types/peer';
-	import { socket } from '$lib/store';
+	import { sendOffer } from '$lib/devices';
+	import { toast } from 'svelte-sonner';
 
 	const DEFAULT_PLACEHOLDER =
 		'https://raw.githubusercontent.com/Cattn/Maple/8c1ab06960d3cec36714bf99cd6cee4ebb53913a/static/temp/MapleD.svg';
@@ -309,10 +310,22 @@
 		if (!track) return;
 	}
 
-	function sendTrackToDevice(device: OwnDevice) {
+	async function sendTrackToDevice(device: OwnDevice) {
 		if (!track) return;
-		// TODO: actually transfer the track. There's no 'peer:send-track' event on the server yet.
-		console.log('Send track', track.id, 'to device', device.id, device.name);
+		const file = await OPFS.getSong(track).catch(() => undefined);
+		if (!file) {
+			toast.error(`Couldn't read "${track.title}" from this device.`);
+			return;
+		}
+		// Only the offer for now: the server forwards it to the other device, but has no
+		// accept/transfer step yet, so the audio itself isn't sent.
+		const reply = await sendOffer(device.id, {
+			name: track.fileName || `${track.title}.${track.ext}`,
+			size: file.size,
+			type: file.type
+		});
+		if (reply.ok) toast.success(`Offered "${track.title}" to ${device.name}`);
+		else toast.error(reply.error);
 	}
 
 	function handlePlaylistHover() {

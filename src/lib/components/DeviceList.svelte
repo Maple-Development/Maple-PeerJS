@@ -1,11 +1,9 @@
 <script lang="ts">
 	import { isLoggedIn } from '$lib/store';
-	import { socket } from '$lib/store';
-	import { devices, selfDeviceId } from '$lib/devices';
+	import { devices, selfId, renameSelf } from '$lib/devices';
 	import type { OwnDevice } from '$shared/types/peer';
 	import { Dialog, Button } from 'm3-svelte';
 	import { goto } from '$app/navigation';
-	import { onMount } from 'svelte';
 
 	const MAX_NAME = 40;
 
@@ -19,16 +17,9 @@
 
 	let editingId = $state<string | null>(null);
 	let draftName = $state('');
-	let selfId = $state('');
-
-	// Registration lives in socketManager (via $lib/devices), so every logged-in tab shows up
-	// even on pages without track cards. This component only displays the list.
-	onMount(() => {
-		selfId = selfDeviceId();
-	});
 
 	let sortedDevices = $derived(
-		[...$devices].sort((a, b) => Number(b.id === selfId) - Number(a.id === selfId))
+		[...$devices].sort((a, b) => Number(b.id === $selfId) - Number(a.id === $selfId))
 	);
 
 	$effect(() => {
@@ -47,10 +38,7 @@
 	}
 
 	function saveEdit() {
-		const name = draftName.trim();
-		if (editingId && name && name.length <= MAX_NAME) {
-			$socket?.emit('peer:rename', editingId, name);
-		}
+		if (editingId === $selfId) renameSelf(draftName);
 		editingId = null;
 	}
 
@@ -92,7 +80,7 @@
 	{:else}
 		<div class="-mx-2 flex min-w-72 flex-col gap-1">
 			{#each sortedDevices as device (device.id)}
-				{@const isSelf = device.id === selfId}
+				{@const isSelf = device.id === $selfId}
 				<div
 					class="group flex items-center gap-1 rounded-2xl transition-colors duration-150 {isSelf ||
 					editingId === device.id
@@ -154,25 +142,28 @@
 								</span>
 							</div>
 						</button>
-						<button
-							onclick={() => startEdit(device)}
-							aria-label="Rename {device.name}"
-							title="Rename"
-							class="text-on-surface-variant hover:bg-surface-container-highest mr-1 rounded-full p-2 opacity-60 transition group-hover:opacity-100 focus-visible:opacity-100"
-						>
-							<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24">
-								<path
-									fill="currentColor"
-									d="M5 19h1.425L16.2 9.225L14.775 7.8L5 17.575zm-2 2v-4.25L16.2 3.575q.3-.275.663-.425t.762-.15t.775.15t.65.45L20.425 5q.3.275.438.65T21 6.4q0 .4-.137.763t-.438.662L7.25 21zM19 6.4L17.6 5zm-3.525 2.125l-.7-.725L16.2 9.225z"
-								/>
-							</svg>
-						</button>
+						<!-- The server only lets a device rename itself. -->
+						{#if isSelf}
+							<button
+								onclick={() => startEdit(device)}
+								aria-label="Rename {device.name}"
+								title="Rename"
+								class="text-on-surface-variant hover:bg-surface-container-highest mr-1 rounded-full p-2 opacity-60 transition group-hover:opacity-100 focus-visible:opacity-100"
+							>
+								<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24">
+									<path
+										fill="currentColor"
+										d="M5 19h1.425L16.2 9.225L14.775 7.8L5 17.575zm-2 2v-4.25L16.2 3.575q.3-.275.663-.425t.762-.15t.775.15t.65.45L20.425 5q.3.275.438.65T21 6.4q0 .4-.137.763t-.438.662L7.25 21zM19 6.4L17.6 5zm-3.525 2.125l-.7-.725L16.2 9.225z"
+									/>
+								</svg>
+							</button>
+						{/if}
 					{/if}
 				</div>
 			{:else}
-				<p class="text-on-surface-variant px-3 py-6 text-center text-sm">Not connected.</p>
+				<p class="text-on-surface-variant px-3 py-6 text-center text-sm">No devices connected.</p>
 			{/each}
-			{#if sortedDevices.length > 0 && sortedDevices.every((d) => d.id === selfId)}
+			{#if sortedDevices.length > 0 && sortedDevices.every((d) => d.id === $selfId)}
 				<p class="text-on-surface-variant px-3 pt-2 pb-1 text-sm">
 					No other devices are online. Open Maple on another device signed in to this account.
 				</p>
