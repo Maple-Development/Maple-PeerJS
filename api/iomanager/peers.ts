@@ -4,7 +4,7 @@ import type { MapleServer, MapleSocket } from "../types/socket.js";
 import { activeSession } from "../auth/session.js";
 import { accountRoom } from "./io.js";
 import { randomUUID } from "node:crypto";
-import { transferRequestSchema, deviceRegistrationSchema } from "../validation/peer.js";
+import { transferRequestSchema, deviceRegistrationSchema, transferDecisionSchema } from "../validation/peer.js";
 
 interface ConnectedDevice {
 	device: OwnDevice;
@@ -16,6 +16,7 @@ interface PendingOffer {
 	offer: TransferOffer;
 	senderSocketId: string;
 	targetSocketId: string;
+	status: 'pending' | 'accepted';
 }
 
 export class PeerManager {
@@ -153,12 +154,78 @@ export class PeerManager {
 				accountId: user.id,
 				offer,
 				senderSocketId: client.id,
-				targetSocketId
+				targetSocketId,
+				status: 'pending'
 			});
 
 			this.io.to(targetSocketId).emit('peer:incoming', offer);
 			reply({ ok: true, transferId: offer.id });
 		});
+
+		client.on('peer:respond', (decision, reply) => {
+			if (typeof reply !== 'function') {
+				return;
+			}
+
+			const sessionExpiresAt = activeSession(this.db, user);
+			if (sessionExpiresAt === undefined) {
+				reply({ ok: false, error: 'Your session has expired.' });
+				client.disconnect(true);
+				return;
+			}
+		
+			const parsed = transferDecisionSchema.safeParse(decision);
+			if (!parsed.success) {
+				reply({ ok: false, error: 'Invalid transfer decision.' });
+				return;
+			}
+
+			const { transferId, accepted } = parsed.data;
+			const pending = this.offers.get(transferId);
+
+			if (!pending || pending.accountId !== user.id) {
+				reply({ ok: false, error: 'Transfer offer not found.' });
+				return;
+			}
+		
+			if (pending.targetSocketId !== client.id) {
+				reply({ ok: false, error: 'This offer belongs to another tab.' });
+				return;
+			}
+		
+			if (pending.status !== 'pending') {
+				reply({ ok: false, error: 'This offer has already been accepted.' });
+				return;
+			}
+
+			if (accepted) {
+				const sender = this.io.sockets.sockets.get(pending.senderSocketId);
+		
+				if (!sender || !sender.connected || !client.connected) {
+					this.offers.delete(transferId);
+					reply({ ok: false, error: 'A transfer participant is offline.' });
+					return;
+				}
+		
+				const senderSessionExpiresAt = activeSession(this.db, sender.data.user);
+				if (sender.data.user.id !== user.id || senderSessionExpiresAt === undefined) {
+					this.offers.delete(transferId);
+					reply({ ok: false, error: 'The sender is no longer authorized.' });
+					return;
+				}
+		
+				pending.status = 'accepted';
+			} else {
+				this.offers.delete(transferId);
+			}
+
+			this.io.to(pending.senderSocketId).emit('peer:decision', {
+				transferId,
+				accepted
+			});
+
+			reply({ ok: true, transferId });
+		})
 
         client.on('disconnect', () => {
 			for (const [offerId, pending] of this.offers) {

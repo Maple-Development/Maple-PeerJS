@@ -21,6 +21,11 @@ export interface TransferOffer {
     file: TransferFile
 }
 
+export interface TransferDecision {
+    transferId: string
+    accepted: boolean
+}
+
 export interface DeviceRegistration {
 	id: string;
 	name: string;
@@ -34,9 +39,14 @@ export interface PeerClientEvents {
         request: TransferRequest,
         reply: (result: TransferReply) => void
     ) => void
+    'peer:respond': (
+        decision: TransferDecision,
+        reply: (result: TransferReply) => void
+    ) => void
 }
 
 export interface PeerServerEvents {
 	'peer:devices': (devices: OwnDevice[]) => void;
     'peer:incoming': (offer: TransferOffer) => void;
+    'peer:decision': (decision: TransferDecision) => void;
 }
