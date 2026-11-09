@@ -9,3 +9,9 @@ export const transferRequestSchema = z.object({
 		type: z.string().max(255)
 	})
 });
+
+// verify it's a valid device scheme
+export const deviceRegistrationSchema = z.object({
+	id: z.uuid(),
+	name: z.string().trim().min(1).max(40)
+});

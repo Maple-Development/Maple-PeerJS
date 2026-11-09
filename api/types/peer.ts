@@ -21,10 +21,15 @@ export interface TransferOffer {
     file: TransferFile
 }
 
+export interface DeviceRegistration {
+	id: string;
+	name: string;
+}
+
 export type TransferReply = | { ok: true; transferId: string } | { ok: false; error: string};
 
 export interface PeerClientEvents {
-	'peer:register': (name: string) => void;
+	'peer:register': (device: DeviceRegistration) => void;
     'peer:offer': (
         request: TransferRequest,
         reply: (result: TransferReply) => void

@@ -4,142 +4,196 @@ import type { MapleServer, MapleSocket } from "../types/socket.js";
 import { activeSession } from "../auth/session.js";
 import { accountRoom } from "./io.js";
 import { randomUUID } from "node:crypto";
-import { transferRequestSchema } from "../validation/peer.js";
+import { transferRequestSchema, deviceRegistrationSchema } from "../validation/peer.js";
+
+interface ConnectedDevice {
+	device: OwnDevice;
+	socketIds: Set<string>;
+}
+
+interface PendingOffer {
+	accountId: string;
+	offer: TransferOffer;
+	senderSocketId: string;
+	targetSocketId: string;
+}
 
 export class PeerManager {
-	private accounts = new Map<string, Map<string, OwnDevice>>();
-    private offers = new Map<string, TransferOffer>();
+	private accounts = new Map<string, Map<string, ConnectedDevice>>();
+    private offers = new Map<string, PendingOffer>();
     
     constructor(private io: MapleServer, private db: Database) {}
 
     connect(client: MapleSocket) {
-        const user = client.data.user;
+		const user = client.data.user;
+		let registeredDeviceId: string | undefined;
 
-        const publish = () => {
-            const accountDevices = this.accounts.get(user.id);
-            let devices: OwnDevice[] = [];
+		const publish = () => {
+			const accountDevices = this.accounts.get(user.id);
+			let devices: OwnDevice[] = [];
 
-            if (accountDevices) {
-                devices = Array.from(accountDevices.values());
-            }
+			if (accountDevices) {
+				devices = Array.from(
+					accountDevices.values(),
+					(entry) => entry.device
+				);
+			}
 
-            const room = accountRoom(user.id)
+			const room = accountRoom(user.id);
+			this.io.to(room).emit('peer:devices', devices);
+		};
 
-            this.io.to(room).emit('peer:devices', devices)
-        };
-
-        client.on('peer:register', (name) => {
-            const sessionExpiresAt = activeSession(this.db, user)
-            if (sessionExpiresAt === undefined) {
-                client.disconnect(true);
-                return;
-            }
-            if (typeof name !== 'string') {
+        client.on('peer:register', (registration) => {
+			const sessionExpiresAt = activeSession(this.db, user);
+			if (sessionExpiresAt === undefined) {
+				client.disconnect(true);
 				return;
 			}
 
-            const deviceName = name.trim();
-            if (deviceName.length === 0 || deviceName.length > 40) {
+			const parsed = deviceRegistrationSchema.safeParse(registration);
+			if (!parsed.success) {
 				return;
 			}
 
-            let accountDevices = this.accounts.get(user.id)
-            if (!accountDevices) {
-                accountDevices = new Map();
-                this.accounts.set(user.id, accountDevices)
-            }
+			const { id, name } = parsed.data;
 
-            const device: OwnDevice = {
-                id: client.id,
-                name: deviceName
-            }
+			if (registeredDeviceId !== undefined && registeredDeviceId !== id) {
+				return;
+			}
 
-            accountDevices.set(client.id, device)
-            publish();
-        });
+			let accountDevices = this.accounts.get(user.id);
+			if (!accountDevices) {
+				accountDevices = new Map();
+				this.accounts.set(user.id, accountDevices);
+			}
+
+			let entry = accountDevices.get(id);
+			if (!entry) {
+				entry = {
+					device: { id, name },
+					socketIds: new Set()
+				};
+
+				accountDevices.set(id, entry);
+			} else if (registeredDeviceId === id) {
+				entry.device.name = name;
+			}
+
+			entry.socketIds.add(client.id);
+			registeredDeviceId = id;
+			publish();
+		});
 
         client.on('peer:offer', (request, reply) => {
-            if (typeof reply !== 'function') {
-                return;
-            }
+			if (typeof reply !== 'function') {
+				return;
+			}
 
-            const sessionExpiresAt = activeSession(this.db, user);
-            if (sessionExpiresAt === undefined) {
-                reply({ ok: false, error: 'Your session has expired' });
-                client.disconnect(true);
-                return;
-            }
+			const sessionExpiresAt = activeSession(this.db, user);
+			if (sessionExpiresAt === undefined) {
+				reply({ ok: false, error: 'Your session has expired.' });
+				client.disconnect(true);
+				return;
+			}
 
             const parsed = transferRequestSchema.safeParse(request);
-            if (!parsed.success) {
-                reply({ ok: false, error: 'Invalid Transfer request' });
-                return;
-            }
+		    if (!parsed.success) {
+				reply({ ok: false, error: 'Invalid transfer request.' });
+				return;
+			}
 
-            const accountDevices = this.accounts.get(user.id);
-            const sender = accountDevices?.get(client.id);
-            const target = accountDevices?.get(parsed.data.targetDeviceId);
+			if (registeredDeviceId === undefined) {
+				reply({ ok: false, error: 'Register this device first.' });
+				return;
+			}
 
-            if (!sender) {
-                reply({ ok: false, error: 'Register this device first' });
-                return;
-            }
+			const accountDevices = this.accounts.get(user.id);
+			const sender = accountDevices?.get(registeredDeviceId);
+			const target = accountDevices?.get(parsed.data.targetDeviceId);
 
-            if (!target) {
-                reply({ ok: false, error: 'The target device is unavailable.' });
-                return;
-            }
-        
-            if (target.id === sender.id) {
-                reply({ ok: false, error: 'Choose another device.' });
-                return;
-            }
+			if (!sender) {
+				reply({ ok: false, error: 'Register this device first.' });
+				return;
+			}
 
-            for (const offer of this.offers.values()) {
-                if (offer.sender.id === client.id) {
-                    reply({ ok: false, error: 'You already have a pending offer.' });
-                    return;
-                }
-            }
+			if (!target) {
+				reply({ ok: false, error: 'The target device is unavailable.' });
+				return;
+			}
 
-            const offer: TransferOffer = {
-                id: randomUUID(),
-                sender: {...sender },
-                targetDeviceId: target.id,
-                file: parsed.data.file
-            }
+            if (sender.device.id === target.device.id) {
+				reply({ ok: false, error: 'Choose another device' });
+				return;
+			}
 
-            this.offers.set(offer.id, offer);
-            this.io.to(target.id).emit('peer:incoming', offer);
+			for (const pending of this.offers.values()) {
+				if (
+					pending.accountId === user.id &&
+					pending.offer.sender.id === sender.device.id
+				) {
+					reply({ ok: false, error: 'You already have a pending offer.' });
+					return;
+				}
+			}
 
-            reply({ ok: true, transferId: offer.id });
-        })
+			const targetSocketId = target.socketIds.values().next().value;
+			if (targetSocketId === undefined) {
+				reply({ ok: false, error: 'The target device is unavailable.' });
+				return;
+			}
+
+			const offer: TransferOffer = {
+				id: randomUUID(),
+				sender: { ...sender.device },
+				targetDeviceId: target.device.id,
+				file: parsed.data.file
+			};
+
+			this.offers.set(offer.id, {
+				accountId: user.id,
+				offer,
+				senderSocketId: client.id,
+				targetSocketId
+			});
+
+			this.io.to(targetSocketId).emit('peer:incoming', offer);
+			reply({ ok: true, transferId: offer.id });
+		});
 
         client.on('disconnect', () => {
-            for (const [offerId, offer] of this.offers) {
-                const isSender = offer.sender.id === client.id;
-                const isRecipient = offer.targetDeviceId === client.id;
-            
-                if (isSender || isRecipient) {
-                    this.offers.delete(offerId);
-                }
-            }
-            
-            const accountDevices = this.accounts.get(user.id)
-            if (!accountDevices) {
-                return;
-            }
+			for (const [offerId, pending] of this.offers) {
+				const isSender = pending.senderSocketId === client.id;
+				const isRecipient = pending.targetSocketId === client.id;
 
-            const deviceRemoved = accountDevices.delete(client.id)
-            if (!deviceRemoved) {
-                return;
-            }
+				if (isSender || isRecipient) {
+					this.offers.delete(offerId);
+				}
+			}
 
-            if (accountDevices.size === 0) {
-                this.accounts.delete(user.id);
-            }
+			if (registeredDeviceId === undefined) {
+				return;
+			}
 
-            publish();
-        })
+			const accountDevices = this.accounts.get(user.id);
+			const entry = accountDevices?.get(registeredDeviceId);
+
+			if (!accountDevices || !entry) {
+				return;
+			}
+
+			entry.socketIds.delete(client.id);
+
+			if (entry.socketIds.size > 0) {
+				return;
+			}
+
+			accountDevices.delete(registeredDeviceId);
+
+			if (accountDevices.size === 0) {
+				this.accounts.delete(user.id);
+			}
+
+			publish();
+		});
     }
 }
