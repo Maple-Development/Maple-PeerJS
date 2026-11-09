@@ -10,6 +10,10 @@
 	import { startPlayback } from '$lib/player';
 	import { recentlyPlayedManager, type QueueSource } from '$lib/store';
 	import { confirmDialog } from '$lib/confirm.svelte';
+	import DeviceList from '$lib/components/DeviceList.svelte';
+	import type { OwnDevice } from '$shared/types/peer';
+	import { sendOffer } from '$lib/devices';
+	import { toast } from 'svelte-sonner';
 
 	const DEFAULT_PLACEHOLDER =
 		'https://raw.githubusercontent.com/Cattn/Maple/8c1ab06960d3cec36714bf99cd6cee4ebb53913a/static/temp/MapleD.svg';
@@ -24,6 +28,7 @@
 	let content: HTMLDivElement | undefined = $state(undefined);
 	let card: HTMLDivElement | undefined = $state(undefined);
 	let hideSubmenuTimeout: number | null = null;
+	let showDeviceList: boolean = $state(false);
 
 	let {
 		track,
@@ -294,6 +299,35 @@
 		}
 	}
 
+	function handleSendTrackToDevice() {
+		showDeviceList = true;
+		showMenu = false;
+		showPlaylistSubmenu = false;
+		if (hideSubmenuTimeout) {
+			clearTimeout(hideSubmenuTimeout);
+			hideSubmenuTimeout = null;
+		}
+		if (!track) return;
+	}
+
+	async function sendTrackToDevice(device: OwnDevice) {
+		if (!track) return;
+		const file = await OPFS.getSong(track).catch(() => undefined);
+		if (!file) {
+			toast.error(`Couldn't read "${track.title}" from this device.`);
+			return;
+		}
+		// Only the offer for now: the server forwards it to the other device, but has no
+		// accept/transfer step yet, so the audio itself isn't sent.
+		const reply = await sendOffer(device.id, {
+			name: track.fileName || `${track.title}.${track.ext}`,
+			size: file.size,
+			type: file.type
+		});
+		if (reply.ok) toast.success(`Offered "${track.title}" to ${device.name}`);
+		else toast.error(reply.error);
+	}
+
 	function handlePlaylistHover() {
 		if (hideSubmenuTimeout) {
 			clearTimeout(hideSubmenuTimeout);
@@ -436,6 +470,18 @@
 					{/if}
 				</div>
 			{/if}
+
+			{#if type === 'track'}
+				<button
+					onclick={handleSendTrackToDevice}
+					class="text-on-surface hover:bg-surface-container-high flex w-full items-center px-4 py-3 text-left transition-colors duration-150"
+				>
+					<svg class="mr-3 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24">
+						<path fill="currentColor" d="M2 21q-.425 0-.712-.288T1 20t.288-.712T2 19h20q.425 0 .713.288T23 20t-.288.713T22 21zm2-3q-.825 0-1.412-.587T2 16V5q0-.825.588-1.412T4 3h16q.825 0 1.413.588T22 5v11q0 .825-.587 1.413T20 18zm0-2h16V5H4zm0 0V5z" />
+					</svg>
+					<span class="text-sm font-medium">Send to Device</span>
+				</button>
+			{/if}
 		</div>
 	</div>
 {/if}
@@ -456,6 +502,10 @@
 		draggable="false"
 	/>
 {/snippet}
+
+{#if type === 'track'}
+	<DeviceList bind:visible={showDeviceList} onSelect={sendTrackToDevice} />
+{/if}
 
 <div
 	bind:this={card}

@@ -6,6 +6,7 @@ import { get } from 'svelte/store';
 import { loadSession } from './api/auth';
 import { SERVER } from './api/server';
 import { UserManager } from './api/UserManager';
+import { watchDevices } from './devices';
 import { watchPlayback } from './playback';
 import UserSettings from './preferences/usersettings';
 import { invalidateFriends, refreshFriends, refreshRequests } from './refreshFriends';
@@ -86,6 +87,7 @@ function listen(client: MapleSocket) {
 	});
 
 	watchPlayback(client);
+	watchDevices(client);
 }
 
 export function syncSocket() {
