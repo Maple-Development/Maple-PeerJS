@@ -17,8 +17,31 @@ export const devices = writable<OwnDevice[]>([]);
 /** This browser's device ID once known (empty until the first lookup finishes). */
 export const selfId = writable('');
 
-/** Offers other devices have sent to this one, newest last. */
-export const incomingOffers = writable<TransferOffer[]>([]);
+export interface IncomingTransfer {
+	offer: TransferOffer;
+	/**
+	 * pending: waiting for the user. answering: their answer is on its way to the server.
+	 * accepted: the file should start arriving. failed: see `error`.
+	 */
+	status: 'pending' | 'answering' | 'accepted' | 'failed';
+	/** Bytes received so far. Nothing fills this in until the file transfer exists. */
+	received: number;
+	error?: string;
+}
+
+/** Offers other devices have sent to this one, oldest first, until the user closes them. */
+export const incomingTransfers = writable<IncomingTransfer[]>([]);
+
+export interface OutgoingOffer {
+	transferId: string;
+	target: OwnDevice;
+	file: TransferFile;
+	/** 'accepted' once the other device said yes and is still online. */
+	status: 'pending' | 'accepted';
+}
+
+/** Offers this device has sent that weren't declined or dropped. */
+export const outgoingOffers = writable<OutgoingOffer[]>([]);
 
 let socket: MapleSocket | null = null;
 
@@ -85,45 +108,166 @@ export function watchDevices(client: MapleSocket) {
 		client.emit('peer:register', { id: await idPromise, name: currentName() });
 	});
 
-	client.on('peer:devices', (list) => devices.set(list));
+	client.on('peer:devices', (list) => {
+		devices.set(list);
+		// The server drops an offer when either side goes offline, without telling the other side.
+		const online = new Set(list.map((device) => device.id));
+		outgoingOffers.update((offers) => offers.filter((offer) => online.has(offer.target.id)));
+		failIncoming(
+			(offer) => !online.has(offer.sender.id),
+			(offer) => `${offer.sender.name} went offline.`
+		);
+	});
 
+	// IncomingOffer.svelte shows these as a popup.
 	client.on('peer:incoming', (offer) => {
-		incomingOffers.update((offers) => [...offers, offer]);
-		// The server has no accept/decline step yet, so this is only a notice for now.
-		toast.info(`${offer.sender.name} wants to send you a track`, {
-			description: `${offer.file.name} (${formatSize(offer.file.size)})`
-		});
+		incomingTransfers.update((list) => [...list, { offer, status: 'pending', received: 0 }]);
+	});
+
+	client.on('peer:decision', ({ transferId, accepted }) => {
+		const offer = get(outgoingOffers).find((o) => o.transferId === transferId);
+		if (!offer) return;
+		const what = `"${offer.file.name}"`;
+
+		if (!accepted) {
+			removeOutgoing(transferId);
+			toast.info(`${offer.target.name} declined ${what}`);
+			return;
+		}
+
+		// The server checked this tab when the answer came in; make sure the other device
+		// hasn't gone offline since, before treating the transfer as on.
+		if (!client.connected || !get(devices).some((device) => device.id === offer.target.id)) {
+			removeOutgoing(transferId);
+			toast.error(`${offer.target.name} accepted ${what}, but is no longer online.`);
+			return;
+		}
+
+		outgoingOffers.update((offers) =>
+			offers.map((o) => (o.transferId === transferId ? { ...o, status: 'accepted' } : o))
+		);
+		toast.success(`${offer.target.name} accepted ${what}`);
 	});
 
 	client.on('disconnect', () => {
 		devices.set([]);
 		// The server drops pending offers when either side disconnects.
-		incomingOffers.set([]);
+		outgoingOffers.set([]);
+		failIncoming(
+			() => true,
+			() => 'Lost connection to the server.'
+		);
 	});
 }
 
-function formatSize(bytes: number): string {
+function removeOutgoing(transferId: string) {
+	outgoingOffers.update((offers) => offers.filter((o) => o.transferId !== transferId));
+}
+
+function updateIncoming(id: string, change: (transfer: IncomingTransfer) => IncomingTransfer) {
+	incomingTransfers.update((list) => list.map((t) => (t.offer.id === id ? change(t) : t)));
+}
+
+/** Mark incoming offers the server has dropped as failed, so their popup says why. */
+function failIncoming(
+	gone: (offer: TransferOffer) => boolean,
+	reason: (offer: TransferOffer) => string
+) {
+	incomingTransfers.update((list) =>
+		list.map((t) =>
+			t.status !== 'failed' && gone(t.offer)
+				? { ...t, status: 'failed', error: reason(t.offer) }
+				: t
+		)
+	);
+}
+
+/** Accept or decline an incoming offer. Only the first answer counts. */
+export async function answerOffer(id: string, accepted: boolean) {
+	const transfer = get(incomingTransfers).find((t) => t.offer.id === id);
+	if (transfer?.status !== 'pending') return;
+	updateIncoming(id, (t) => ({ ...t, status: 'answering' }));
+
+	const reply = await respondToOffer(id, accepted);
+	// It may have failed meanwhile (e.g. the sender went offline); keep that reason.
+	if (get(incomingTransfers).find((t) => t.offer.id === id)?.status !== 'answering') return;
+
+	if (!reply.ok) updateIncoming(id, (t) => ({ ...t, status: 'failed', error: reply.error }));
+	else if (accepted) updateIncoming(id, (t) => ({ ...t, status: 'accepted' }));
+	else closeIncoming(id);
+}
+
+/** Take an answered or failed offer off the screen. */
+export function closeIncoming(id: string) {
+	incomingTransfers.update((list) => list.filter((t) => t.offer.id !== id));
+}
+
+/** Whether every byte of an accepted offer has arrived. */
+export function isReceived(transfer: IncomingTransfer): boolean {
+	return transfer.status === 'accepted' && transfer.received >= transfer.offer.file.size;
+}
+
+/**
+ * Stop receiving an accepted offer, or throw away one that has arrived, and close it.
+ * Only local for now: the server has no cancel event, so the sender isn't told.
+ */
+export function cancelIncoming(id: string) {
+	closeIncoming(id);
+}
+
+/**
+ * Keep a track once it has fully arrived.
+ * Placeholder: with no file transfer yet there's nothing to save, so this only closes it.
+ */
+export function confirmIncoming(id: string) {
+	const transfer = get(incomingTransfers).find((t) => t.offer.id === id);
+	if (!transfer || !isReceived(transfer)) return;
+	closeIncoming(id);
+}
+
+export function formatSize(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
 	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** Ask the server to offer a file to another of this account's devices. */
-export function sendOffer(targetDeviceId: string, file: TransferFile): Promise<TransferReply> {
+type Ack = (err: Error | null, reply: TransferReply) => void;
+
+/** Emit an event the server answers, giving up after OFFER_TIMEOUT_MS. */
+function request(send: (client: MapleSocket, ack: Ack) => void): Promise<TransferReply> {
 	const client = socket;
 	if (!client?.connected) {
 		return Promise.resolve({ ok: false, error: 'Not connected.' });
 	}
-	return new Promise((resolve) => {
-		const timer = setTimeout(
-			() => resolve({ ok: false, error: 'The server did not respond.' }),
-			OFFER_TIMEOUT_MS
-		);
-		client.emit('peer:offer', { targetDeviceId, file }, (reply) => {
-			clearTimeout(timer);
-			resolve(reply);
-		});
-	});
+	return new Promise((resolve) =>
+		send(client, (err, reply) =>
+			resolve(err ? { ok: false, error: 'The server did not respond.' } : reply)
+		)
+	);
+}
+
+/**
+ * Offer a file to another of this account's devices. On success the offer is tracked in
+ * `outgoingOffers` until the other device answers.
+ */
+export async function sendOffer(target: OwnDevice, file: TransferFile): Promise<TransferReply> {
+	const reply = await request((client, ack) =>
+		client.timeout(OFFER_TIMEOUT_MS).emit('peer:offer', { targetDeviceId: target.id, file }, ack)
+	);
+	if (reply.ok) {
+		outgoingOffers.update((offers) => [
+			...offers,
+			{ transferId: reply.transferId, target, file, status: 'pending' }
+		]);
+	}
+	return reply;
+}
+
+/** Answer an offer another device sent to this one. */
+export function respondToOffer(transferId: string, accepted: boolean): Promise<TransferReply> {
+	return request((client, ack) =>
+		client.timeout(OFFER_TIMEOUT_MS).emit('peer:respond', { transferId, accepted }, ack)
+	);
 }
 
 /**

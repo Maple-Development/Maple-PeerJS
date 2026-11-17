@@ -317,14 +317,14 @@
 			toast.error(`Couldn't read "${track.title}" from this device.`);
 			return;
 		}
-		// Only the offer for now: the server forwards it to the other device, but has no
-		// accept/transfer step yet, so the audio itself isn't sent.
-		const reply = await sendOffer(device.id, {
+		// Only the offer so far: devices.ts reports whether the other device accepts, but the
+		// audio itself isn't sent yet.
+		const reply = await sendOffer(device, {
 			name: track.fileName || `${track.title}.${track.ext}`,
 			size: file.size,
 			type: file.type
 		});
-		if (reply.ok) toast.success(`Offered "${track.title}" to ${device.name}`);
+		if (reply.ok) toast.info(`Waiting for ${device.name} to accept "${track.title}"`);
 		else toast.error(reply.error);
 	}
 
