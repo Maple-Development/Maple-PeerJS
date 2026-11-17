@@ -1,10 +1,10 @@
 import type { Database } from "../storage/sqlite.js";
-import type { OwnDevice, TransferOffer } from "../types/peer.js";
+import type { OwnDevice, TransferOffer, TransferEnded } from "../types/peer.js";
 import type { MapleServer, MapleSocket } from "../types/socket.js";
 import { activeSession } from "../auth/session.js";
 import { accountRoom } from "./io.js";
 import { randomUUID } from "node:crypto";
-import { transferRequestSchema, deviceRegistrationSchema } from "../validation/peer.js";
+import { transferRequestSchema, deviceRegistrationSchema, transferDecisionSchema, transferCancelSchema } from "../validation/peer.js";
 
 interface ConnectedDevice {
 	device: OwnDevice;
@@ -16,6 +16,7 @@ interface PendingOffer {
 	offer: TransferOffer;
 	senderSocketId: string;
 	targetSocketId: string;
+	status: 'pending' | 'accepted';
 }
 
 export class PeerManager {
@@ -23,6 +24,20 @@ export class PeerManager {
     private offers = new Map<string, PendingOffer>();
     
     constructor(private io: MapleServer, private db: Database) {}
+
+	private endTransfer(transferId: string, reason: TransferEnded['reason']): void {
+		const pending = this.offers.get(transferId);
+		if (!pending) {
+			return;
+		}
+
+		this.offers.delete(transferId);
+
+		this.io
+			.to(pending.senderSocketId)
+			.to(pending.targetSocketId)
+			.emit('peer:ended', { transferId, reason });
+	}
 
     connect(client: MapleSocket) {
 		const user = client.data.user;
@@ -153,20 +168,122 @@ export class PeerManager {
 				accountId: user.id,
 				offer,
 				senderSocketId: client.id,
-				targetSocketId
+				targetSocketId,
+				status: 'pending'
 			});
 
 			this.io.to(targetSocketId).emit('peer:incoming', offer);
 			reply({ ok: true, transferId: offer.id });
 		});
 
-        client.on('disconnect', () => {
-			for (const [offerId, pending] of this.offers) {
-				const isSender = pending.senderSocketId === client.id;
-				const isRecipient = pending.targetSocketId === client.id;
+		client.on('peer:respond', (decision, reply) => {
+			if (typeof reply !== 'function') {
+				return;
+			}
 
-				if (isSender || isRecipient) {
-					this.offers.delete(offerId);
+			const sessionExpiresAt = activeSession(this.db, user);
+			if (sessionExpiresAt === undefined) {
+				reply({ ok: false, error: 'Your session has expired.' });
+				client.disconnect(true);
+				return;
+			}
+		
+			const parsed = transferDecisionSchema.safeParse(decision);
+			if (!parsed.success) {
+				reply({ ok: false, error: 'Invalid transfer decision.' });
+				return;
+			}
+
+			const { transferId, accepted } = parsed.data;
+			const pending = this.offers.get(transferId);
+
+			if (!pending || pending.accountId !== user.id) {
+				reply({ ok: false, error: 'Transfer offer not found.' });
+				return;
+			}
+		
+			if (pending.targetSocketId !== client.id) {
+				reply({ ok: false, error: 'This offer belongs to another tab.' });
+				return;
+			}
+		
+			if (pending.status !== 'pending') {
+				reply({ ok: false, error: 'This offer has already been accepted.' });
+				return;
+			}
+
+			if (accepted) {
+				const sender = this.io.sockets.sockets.get(pending.senderSocketId);
+		
+				if (!sender || !sender.connected || !client.connected) {
+					this.endTransfer(transferId, 'disconnected');
+					reply({ ok: false, error: 'A transfer participant is offline.' });
+					return;
+				}
+		
+				const senderSessionExpiresAt = activeSession(this.db, sender.data.user);
+				if (sender.data.user.id !== user.id || senderSessionExpiresAt === undefined) {
+					this.endTransfer(transferId, 'unauthorized');
+					reply({ ok: false, error: 'The sender is no longer authorized.' });
+					return;
+				}
+		
+				pending.status = 'accepted';
+			} else {
+				this.endTransfer(transferId, 'cancelled');
+			}
+
+			this.io.to(pending.senderSocketId).emit('peer:decision', {
+				transferId,
+				accepted
+			});
+
+			reply({ ok: true, transferId });
+		})
+
+		client.on('peer:cancel', (request, reply) => {
+			if (typeof reply !== 'function') {
+				return;
+			}
+		
+			if (activeSession(this.db, user) === undefined) {
+				reply({ ok: false, error: 'Your session has expired.' });
+				client.disconnect(true);
+				return;
+			}
+		
+			const parsed = transferCancelSchema.safeParse(request);
+			if (!parsed.success) {
+				reply({ ok: false, error: 'Invalid cancellation request.' });
+				return;
+			}
+
+			const { transferId } = parsed.data;
+			const pending = this.offers.get(transferId);
+
+			if (!pending || pending.accountId !== user.id) {
+				reply({ ok: false, error: 'Transfer offer not found.' });
+				return;
+			}
+
+			const isParticipant = pending.senderSocketId === client.id || pending.targetSocketId === client.id;
+			if (!isParticipant) {
+				reply({ ok: false, error: 'This offer belongs to another tab.' });
+				return;
+			}
+
+			this.endTransfer(transferId, 'cancelled');
+			reply({ ok: true, transferId });
+		})
+
+        client.on('disconnect', () => {
+			for (const [transferId, pending] of this.offers) {
+				const isParticipant =
+					pending.senderSocketId === client.id ||
+					pending.targetSocketId === client.id;
+			
+				if (isParticipant) {
+					this.endTransfer(transferId, 'disconnected');
 				}
 			}
 
