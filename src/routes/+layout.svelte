@@ -21,6 +21,7 @@
 	import LibraryImportSheet from '$lib/components/LibraryImportSheet.svelte';
 	import PasskeyPrompt from '$lib/components/PasskeyPrompt.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+	import TransferDialog from '$lib/components/TransferDialog.svelte';
 
 	let { children, data } = $props();
 	let initialNavigation = true;
@@ -148,6 +149,8 @@
 <PasskeyPrompt />
 
 <ConfirmDialog />
+
+<TransferDialog />
 
 <Toaster position="bottom-right" />
 
