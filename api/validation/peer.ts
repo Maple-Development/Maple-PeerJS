@@ -19,3 +19,7 @@ export const transferDecisionSchema = z.object({
 	transferId: z.uuid(),
 	accepted: z.boolean()
 });
+
+export const transferCancelSchema = z.object({
+	transferId: z.uuid()
+});
