@@ -26,6 +26,15 @@ export interface TransferDecision {
     accepted: boolean
 }
 
+export interface TransferCancel {
+	transferId: string;
+}
+
+export interface TransferEnded {
+	transferId: string;
+	reason: 'cancelled' | 'disconnected' | 'unauthorized';
+}
+
 export interface DeviceRegistration {
 	id: string;
 	name: string;
@@ -43,10 +52,15 @@ export interface PeerClientEvents {
         decision: TransferDecision,
         reply: (result: TransferReply) => void
     ) => void
+    'peer:cancel': (
+        request: TransferCancel,
+        reply: (result: TransferReply) => void
+    ) => void;
 }
 
 export interface PeerServerEvents {
 	'peer:devices': (devices: OwnDevice[]) => void;
     'peer:incoming': (offer: TransferOffer) => void;
     'peer:decision': (decision: TransferDecision) => void;
+    'peer:ended': (event: TransferEnded) => void;
 }
