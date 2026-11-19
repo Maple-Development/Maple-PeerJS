@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { Button, Dialog, LinearProgress } from 'm3-svelte';
 	import type { TransferFile } from '$shared/types/peer';
+	import DeviceMessage from './DeviceMessage.svelte';
 	import {
 		answerOffer,
 		cancelIncoming,
@@ -51,7 +52,7 @@
 				error: incoming.error
 			};
 		}
-		// Pending offers are shown as a toast instead (see Track.svelte), even while canceling.
+		// Pending offers are shown as a toast instead (see sendOffer in devices.ts), even while canceling.
 		const outgoing = $outgoingOffers.find((o) => o.status !== 'pending');
 		if (outgoing) {
 			return {
@@ -94,20 +95,21 @@
 						: 'Incoming track'
 	);
 
-	let progressText = $derived(
+	// The text around the other device's name, which is shown in bold between the two.
+	let progressText: [string, string] = $derived(
 		!current
-			? ''
+			? ['', '']
 			: incoming
 				? current.done
-					? `Received from ${current.peer}. Keep it?`
+					? ['Received from ', '. Keep it?']
 					: current.bytes === 0
-						? `Waiting for ${current.peer} to start sending…`
-						: `Receiving from ${current.peer}…`
+						? ['Waiting for ', ' to start sending…']
+						: ['Receiving from ', '…']
 				: current.done
-					? `Sent to ${current.peer}.`
+					? ['Sent to ', '.']
 					: current.bytes === 0
-						? `Starting to send to ${current.peer}…`
-						: `Sending to ${current.peer}…`
+						? ['Starting to send to ', '…']
+						: ['Sending to ', '…']
 	);
 
 	let percent = $derived(
@@ -166,7 +168,7 @@
 	{#if current}
 		<div class="flex w-80 max-w-full flex-col gap-4">
 			{#if current.status === 'pending' || current.status === 'answering'}
-				<p><span class="font-medium">{current.peer}</span> wants to send you a track.</p>
+				<p><DeviceMessage device={current.peer} after=" wants to send you a track." /></p>
 			{/if}
 
 			<div class="bg-surface-container-highest flex items-center gap-3 rounded-2xl p-3">
@@ -185,9 +187,10 @@
 						{current.file.name}
 					</span>
 					<span class="text-on-surface-variant text-xs">
-						{formatSize(current.file.size)}{answered
-							? ` ${incoming ? 'from' : 'to'} ${current.peer}`
-							: ''}
+						{formatSize(current.file.size)}{#if answered}<DeviceMessage
+								before=" {incoming ? 'from' : 'to'} "
+								device={current.peer}
+							/>{/if}
 					</span>
 				</div>
 			</div>
@@ -197,7 +200,13 @@
 				<div class="flex flex-col gap-2">
 					<LinearProgress {percent} />
 					<div class="text-on-surface-variant flex justify-between gap-3 text-xs">
-						<span>{progressText}</span>
+						<span
+							><DeviceMessage
+								before={progressText[0]}
+								device={current.peer}
+								after={progressText[1]}
+							/></span
+						>
 						<span class="flex-shrink-0"
 							>{formatSize(current.bytes)} of {formatSize(current.file.size)}</span
 						>

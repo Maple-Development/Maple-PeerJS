@@ -12,7 +12,7 @@
 	import { confirmDialog } from '$lib/confirm.svelte';
 	import DeviceList from '$lib/components/DeviceList.svelte';
 	import type { OwnDevice } from '$shared/types/peer';
-	import { cancelOutgoing, sendOffer } from '$lib/devices';
+	import { sendOffer } from '$lib/devices';
 	import { toast } from 'svelte-sonner';
 
 	const DEFAULT_PLACEHOLDER =
@@ -319,23 +319,16 @@
 		}
 		// Only the offer so far: devices.ts reports whether the other device accepts, but the
 		// audio itself isn't sent yet.
-		const reply = await sendOffer(device, {
-			name: track.fileName || `${track.title}.${track.ext}`,
-			size: file.size,
-			type: file.type
-		});
-		if (!reply.ok) {
-			toast.error(reply.error);
-			return;
-		}
-		const { transferId } = reply;
-		// Stays up until the other device answers. devices.ts then swaps it for the transfer
-		// popup, or replaces it (same id) if the offer is declined or drops.
-		toast.info(`Waiting for ${device.name} to accept "${track.title}"`, {
-			id: transferId,
-			duration: Number.POSITIVE_INFINITY,
-			action: { label: 'Cancel', onClick: () => void cancelOutgoing(transferId) }
-		});
+		const reply = await sendOffer(
+			device,
+			{
+				name: track.fileName || `${track.title}.${track.ext}`,
+				size: file.size,
+				type: file.type
+			},
+			track.title
+		);
+		if (!reply.ok) toast.error(reply.error);
 	}
 
 	function handlePlaylistHover() {
