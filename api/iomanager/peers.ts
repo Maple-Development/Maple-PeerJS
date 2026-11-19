@@ -6,6 +6,8 @@ import { accountRoom } from "./io.js";
 import { randomUUID } from "node:crypto";
 import { transferRequestSchema, deviceRegistrationSchema, transferDecisionSchema, transferCancelSchema } from "../validation/peer.js";
 
+const OFFER_EXPIRY_MS = 300_000; // 5 minutes until expiration
+
 interface ConnectedDevice {
 	device: OwnDevice;
 	socketIds: Set<string>;
@@ -17,6 +19,7 @@ interface PendingOffer {
 	senderSocketId: string;
 	targetSocketId: string;
 	status: 'pending' | 'accepted';
+	expiryTimer: ReturnType<typeof setTimeout>;
 }
 
 export class PeerManager {
@@ -31,6 +34,7 @@ export class PeerManager {
 			return;
 		}
 
+		clearTimeout(pending.expiryTimer);
 		this.offers.delete(transferId);
 
 		this.io
@@ -164,12 +168,19 @@ export class PeerManager {
 				file: parsed.data.file
 			};
 
+			const expiryTimer = setTimeout(() => {
+				if (this.offers.get(offer.id)?.status === 'pending') {
+					this.endTransfer(offer.id, 'expired');
+				}
+			}, OFFER_EXPIRY_MS);
+			
 			this.offers.set(offer.id, {
 				accountId: user.id,
 				offer,
 				senderSocketId: client.id,
 				targetSocketId,
-				status: 'pending'
+				status: 'pending',
+				expiryTimer
 			});
 
 			this.io.to(targetSocketId).emit('peer:incoming', offer);
@@ -228,9 +239,11 @@ export class PeerManager {
 					return;
 				}
 		
+				clearTimeout(pending.expiryTimer);
 				pending.status = 'accepted';
 			} else {
-				this.endTransfer(transferId, 'cancelled');
+				clearTimeout(pending.expiryTimer);
+				this.offers.delete(transferId);
 			}
 
 			this.io.to(pending.senderSocketId).emit('peer:decision', {

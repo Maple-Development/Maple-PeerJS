@@ -32,7 +32,7 @@ export interface TransferCancel {
 
 export interface TransferEnded {
 	transferId: string;
-	reason: 'cancelled' | 'disconnected' | 'unauthorized';
+	reason: 'cancelled' | 'disconnected' | 'unauthorized' | 'expired';
 }
 
 export interface DeviceRegistration {
