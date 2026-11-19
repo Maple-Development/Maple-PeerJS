@@ -1,5 +1,5 @@
 import { browser } from '$app/environment';
-import { friends, isLoggedIn, pendingRequests, socket } from '$lib/store';
+import { friends, isLoggedIn, pendingRequests, socket, socketEnabled } from '$lib/store';
 import { io } from 'socket.io-client';
 import { toast } from 'svelte-sonner';
 import { get } from 'svelte/store';
@@ -8,7 +8,6 @@ import { SERVER } from './api/server';
 import { UserManager } from './api/UserManager';
 import { watchDevices } from './devices';
 import { watchPlayback } from './playback';
-import UserSettings from './preferences/usersettings';
 import { invalidateFriends, refreshFriends, refreshRequests } from './refreshFriends';
 import type { MapleSocket, Profile } from './types';
 
@@ -90,9 +89,11 @@ function listen(client: MapleSocket) {
 	watchDevices(client);
 }
 
-export function syncSocket() {
+// Not exported: callers change isLoggedIn or socketEnabled instead. A function imported from
+// here would go stale after a hot reload, since this module accepts its own updates.
+function syncSocket() {
 	const current = get(socket);
-	if (!get(isLoggedIn) || !UserSettings.preferences.socket) {
+	if (!get(isLoggedIn) || !get(socketEnabled)) {
 		current?.disconnect();
 		socket.set(null);
 		return;
@@ -104,13 +105,22 @@ export function syncSocket() {
 }
 
 if (browser) {
-	const unsubscribe = isLoggedIn.subscribe((loggedIn) => {
+	const unsubscribeLogin = isLoggedIn.subscribe((loggedIn) => {
 		syncSocket();
 		if (loggedIn) {
 			void refreshFriends();
 			void refreshRequests();
 		}
 	});
+	const unsubscribeEnabled = socketEnabled.subscribe(syncSocket);
+	const unsubscribe = () => {
+		unsubscribeLogin();
+		unsubscribeEnabled();
+	};
+	// Accept updates here (including ones to devices.ts or playback.ts) so Vite runs the
+	// dispose below. Otherwise the old socket survives and keeps feeding the old modules'
+	// stores, while components read the new, empty ones.
+	import.meta.hot?.accept();
 	import.meta.hot?.dispose(() => {
 		unsubscribe();
 		get(socket)?.disconnect();

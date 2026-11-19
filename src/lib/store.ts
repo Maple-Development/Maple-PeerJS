@@ -5,12 +5,15 @@ import type { Friend, FriendRequests, MapleSocket, Song, User } from '$lib/types
 import { normalizeStats, stats, statsManager } from './stats';
 export { stats, statsManager };
 import { OPFS } from '$lib/opfs';
+import UserSettings from './preferences/usersettings';
 
 export type QueueSource = 'none' | 'album' | 'playlist' | 'artist' | 'tracks' | 'recent' | 'custom';
 
 export const pendingRequests = writable<FriendRequests>({ incoming: [], outgoing: [] });
 export const friends = writable<Friend[]>([]);
 export const isLoggedIn = writable(false);
+/** The "socket" preference. socketManager connects or disconnects whenever it changes. */
+export const socketEnabled = writable(UserSettings.preferences.socket);
 export type AppInstallPromptEvent = Event & {
 	prompt(): Promise<void>;
 	userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
