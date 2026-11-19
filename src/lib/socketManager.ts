@@ -111,6 +111,10 @@ if (browser) {
 			void refreshRequests();
 		}
 	});
+	// Accept updates here (including ones to devices.ts or playback.ts) so Vite runs the
+	// dispose below. Otherwise the old socket survives and keeps feeding the old modules'
+	// stores, while components read the new, empty ones.
+	import.meta.hot?.accept();
 	import.meta.hot?.dispose(() => {
 		unsubscribe();
 		get(socket)?.disconnect();
