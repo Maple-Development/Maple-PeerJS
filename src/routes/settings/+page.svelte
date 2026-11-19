@@ -6,13 +6,12 @@
 	import { onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import { toast } from 'svelte-sonner';
-	import { title } from '$lib/store';
+	import { title, socketEnabled } from '$lib/store';
 	import { themeSettings, setThemeSettings, persistThemeSettings } from '$lib/theme/theme';
 	import { UserManager } from '$lib/api/UserManager';
 	import { loadSession } from '$lib/api/auth';
 	import UserSettings from '$lib/preferences/usersettings';
 	import { Settings } from '$lib/preferences/fetch';
-	import { syncSocket } from '$lib/socketManager';
 	import AccountSecurity from '$lib/components/AccountSecurity.svelte';
 	import { OPFS } from '$lib/opfs';
 	import { createLibrary } from '$lib/library';
@@ -211,7 +210,7 @@
 					return;
 				}
 			}
-			syncSocket();
+			socketEnabled.set(socketCommunicationEnabled);
 			initialSocketCommunicationEnabled = socketCommunicationEnabled;
 		}
 
