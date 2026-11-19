@@ -9,9 +9,10 @@ import type {
 	TransferReply
 } from '$shared/types/peer';
 import type { MapleSocket } from './types';
+import DeviceMessage from './components/DeviceMessage.svelte';
 
 const OFFER_TIMEOUT_MS = 10_000;
-// How long the sender's notices stay up once there's nothing left to cancel.
+// How long notices stay up once there's nothing left to cancel.
 const NOTICE_MS = 5_000;
 
 const CANCELLED_BY_SENDER = 'This transfer was canceled by the sender.';
@@ -57,6 +58,8 @@ export interface OutgoingOffer {
 	 * cancelled: the receiver stopped it. failed: it ended some other way.
 	 */
 	status: 'pending' | 'accepted' | 'cancelled' | 'failed';
+	/** What notices call the file, e.g. the track's title. */
+	label: string;
 	/** Bytes sent so far. Nothing fills this in until the file transfer exists. */
 	sent: number;
 	/** This device asked the server to cancel and is waiting for it to confirm. */
@@ -157,7 +160,6 @@ export function watchDevices(client: MapleSocket) {
 		const offer = get(outgoingOffers).find((o) => o.transferId === transferId);
 		if (offer?.status !== 'pending' || offer.cancelling) return;
 
-		// A decline normally shows up first as peer:ended, which already handled it.
 		if (!accepted) {
 			endOutgoing(offer, 'cancelled');
 			return;
@@ -228,12 +230,30 @@ function endOutgoing(offer: OutgoingOffer, reason: TransferEnded['reason']) {
 	// any option it doesn't set, so the old Cancel button has to be cleared explicitly.
 	const options = { id: offer.transferId, duration: NOTICE_MS, action: undefined };
 
-	if (reason !== 'cancelled') {
+	if (reason === 'expired') {
+		// Nothing is left on either device, so the user can simply offer it again.
+		toast.info(DeviceMessage, {
+			...options,
+			componentProps: { device: offer.target.name, after: " didn't answer in time" },
+			description: `The offer for "${offer.label}" expired.`,
+			action: {
+				label: 'Try again',
+				onClick: () => void retryOffer(offer)
+			}
+		});
+	} else if (reason !== 'cancelled') {
 		toast.error(ENDED_UNEXPECTEDLY, { ...options, description: offer.file.name });
 	} else {
-		// Declining an offer ends it as 'cancelled' too.
-		toast.info(`${offer.target.name} declined ${what}`, options);
+		toast.info(DeviceMessage, {
+			...options,
+			componentProps: { device: offer.target.name, after: ` declined ${what}` }
+		});
 	}
+}
+
+async function retryOffer(offer: OutgoingOffer) {
+	const reply = await sendOffer(offer.target, offer.file, offer.label);
+	if (!reply.ok) toast.error(reply.error);
 }
 
 function updateIncoming(id: string, change: (transfer: IncomingTransfer) => IncomingTransfer) {
@@ -247,9 +267,25 @@ export function isOver(transfer: { status: string }): boolean {
 
 /** Keep an incoming offer the sender (or the network) ended on screen, saying why. */
 function endIncoming(id: string, reason: TransferEnded['reason']) {
+	const transfer = get(incomingTransfers).find((t) => t.offer.id === id);
 	// This device asked for it: the server ending it is the confirmation.
-	if (get(incomingTransfers).find((t) => t.offer.id === id)?.cancelling) {
+	if (transfer?.cancelling) {
 		closeIncoming(id);
+		return;
+	}
+	// Nobody answered in time. The sender is told and can offer it again, so there's nothing
+	// for this device to keep.
+	if (reason === 'expired' && transfer && !isOver(transfer)) {
+		closeIncoming(id);
+		toast.info(DeviceMessage, {
+			componentProps: {
+				before: 'The offer from ',
+				device: transfer.offer.sender.name,
+				after: ' expired'
+			},
+			description: transfer.offer.file.name,
+			duration: NOTICE_MS
+		});
 		return;
 	}
 	updateIncoming(id, (t) =>
@@ -267,7 +303,6 @@ export async function answerOffer(id: string, accepted: boolean) {
 	if (transfer?.status !== 'pending') return;
 
 	if (!accepted) {
-		// Gone before the server's peer:ended comes back, so that isn't shown as the sender cancelling.
 		closeIncoming(id);
 		await respondToOffer(id, false);
 		return;
@@ -346,19 +381,33 @@ function request(send: (client: MapleSocket, ack: Ack) => void): Promise<Transfe
 }
 
 /**
- * Offer a file to another of this account's devices. On success the offer is tracked in
- * `outgoingOffers` until the other device answers.
+ * Offer a file to another of this account's devices, called `label` in notices. On success
+ * the offer is tracked in `outgoingOffers` and a "waiting" notice stays up until the other
+ * device answers. On failure the caller decides how to show the error.
  */
-export async function sendOffer(target: OwnDevice, file: TransferFile): Promise<TransferReply> {
+export async function sendOffer(
+	target: OwnDevice,
+	file: TransferFile,
+	label = file.name
+): Promise<TransferReply> {
 	const reply = await request((client, ack) =>
 		client.timeout(OFFER_TIMEOUT_MS).emit('peer:offer', { targetDeviceId: target.id, file }, ack)
 	);
-	if (reply.ok) {
-		outgoingOffers.update((offers) => [
-			...offers,
-			{ transferId: reply.transferId, target, file, status: 'pending', sent: 0 }
-		]);
-	}
+	if (!reply.ok) return reply;
+
+	const { transferId } = reply;
+	outgoingOffers.update((offers) => [
+		...offers,
+		{ transferId, target, file, label, status: 'pending', sent: 0 }
+	]);
+	// Stays up until the other device answers. peer:decision then swaps it for the transfer
+	// popup, or endOutgoing replaces it (same id) if the offer is declined, expires or drops.
+	toast.info(DeviceMessage, {
+		id: transferId,
+		componentProps: { before: 'Waiting for ', device: target.name, after: ` to accept "${label}"` },
+		duration: Number.POSITIVE_INFINITY,
+		action: { label: 'Cancel', onClick: () => void cancelOutgoing(transferId) }
+	});
 	return reply;
 }
 
