@@ -93,3 +93,15 @@ export type Song = {
 	disk: number;
 	ext: string;
 };
+
+export type PeerMessage =
+	| {
+			type: 'start';
+			transferId: string;
+			size: number;
+			chunkSize: number;
+			sendWindow: number;
+	}
+	| { type: 'chunk'; offset: number; bytes: ArrayBuffer }
+	| { type: 'ack'; nextOffset: number }
+	| { type: 'end'; sha256: string };
