@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { hasLyrics } from '$lib/lyrics';
+	import LyricsIcon from './LyricsIcon.svelte';
 	import { Button, Slider } from 'm3-svelte';
 	import {
 		activeSong,
@@ -19,8 +21,9 @@
 	} from '$lib/player';
 	import { OPFS } from '$lib/opfs';
 	import { browser } from '$app/environment';
-	import { page } from '$app/state';
-	import Queue from './Queue.svelte';
+
+	let { lyricsOpen = $bindable(), queueOpen = $bindable() }:
+		{ lyricsOpen: boolean; queueOpen: boolean } = $props();
 
 	let artwork = $state(null as string | null);
 	let progress = $state(0);
@@ -29,12 +32,6 @@
 	let fillPercent = $state(0);
 	let trackEl: HTMLDivElement | null = null;
 	let dragging = $state(false);
-	let queueOpen = $state(false);
-
-	$effect(() => {
-		page.url.pathname;
-		queueOpen = false;
-	});
 
 	$effect(() => {
 		if (!browser) return;
@@ -242,6 +239,8 @@
 						iconType="full"
 						square
 						variant={queueOpen ? 'filled' : 'tonal'}
+						aria-label="Queue"
+						aria-pressed={queueOpen}
 						onclick={openQueue}
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
@@ -252,6 +251,21 @@
 						>
 					</Button>
 				</div>
+				{#if hasLyrics($activeSong)}
+					<div class="ml-2">
+						<Button
+							iconType="full"
+							square
+							variant={lyricsOpen ? 'filled' : 'tonal'}
+							aria-label="Lyrics"
+							aria-pressed={lyricsOpen}
+							title="Lyrics"
+							onclick={() => (lyricsOpen = !lyricsOpen)}
+						>
+							<LyricsIcon />
+						</Button>
+					</div>
+				{/if}
 				<div class="mx-2 hidden xl:block">
 					<svg
 						class="fill-icon-color scale-110"
@@ -292,10 +306,6 @@
 		</div>
 	</div>
 </div>
-
-{#if queueOpen}
-	<Queue onClose={() => (queueOpen = false)} />
-{/if}
 
 <style>
 	.song-title {
