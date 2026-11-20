@@ -1,9 +1,13 @@
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { parseArgs } from 'node:util';
 import bcrypt from 'bcrypt';
+import express from 'express';
+import { ExpressPeerServer } from 'peer';
 import { createMaple } from '../app.js';
 import type { SendEmail } from '../auth/email.js';
 import { password } from '../auth/password.js';
@@ -12,8 +16,10 @@ import { createFile } from '../storage/create-file.js';
 import { openDatabase, type Database } from '../storage/sqlite.js';
 
 const prefix = 'maple-preview-';
-const host = '127.0.0.1';
+const defaultHost = '127.0.0.1';
 const port = 3000;
+const peerPort = 9000;
+const peerPath = '/peerjs';
 const guest = { username: 'guest', password: 'guest', email: 'guest@example.test' };
 const legacy = { username: 'legacy', password: 'LegacyPreview1' };
 
@@ -22,13 +28,13 @@ const printEmail: SendEmail = async ({ to, subject, text }) => {
 };
 
 function describe(error: Error) {
-	return 'code' in error && error.code === 'EADDRINUSE'
-		? `Port ${port} is already in use. Stop the other API server and try again.`
+	return 'code' in error && error.code === 'EADDRINUSE' && 'port' in error
+		? `Port ${error.port} is already in use. Free that port and try again.`
 		: error.message;
 }
 
-async function assertPortFree() {
-	for (const address of [host, '::1']) {
+async function assertPortFree(port: number, host: string) {
+	for (const address of host === defaultHost ? [host, '::1'] : [host]) {
 		await new Promise<void>((resolve, reject) => {
 			const probe = net.createServer();
 			probe.once('error', (error) => {
@@ -60,7 +66,24 @@ function removeOwnedDirectory(directory: string) {
 }
 
 async function main() {
-	await assertPortFree();
+	const args = process.argv.slice(2);
+	const { values } = parseArgs({
+		args: args.map((arg, i) => {
+			const next = args[i + 1];
+			return arg === '--host' && (next === undefined || next.startsWith('--'))
+				? '--host=0.0.0.0'
+				: arg;
+		}),
+		options: { host: { type: 'string', default: defaultHost } }
+	});
+	const host = values.host;
+	if (!host) throw new Error('--host requires a non-empty address.');
+	const urlHost = [defaultHost, '0.0.0.0', '::', '::1'].includes(host)
+		? 'localhost'
+		: net.isIPv6(host)
+			? `[${host}]`
+			: host;
+	await Promise.all([assertPortFree(port, host), assertPortFree(peerPort, host)]);
 	const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	let db: Database | undefined;
 	const cleanup = () => {
@@ -79,7 +102,9 @@ async function main() {
 			{
 				BETTER_AUTH_SECRET: randomBytes(32).toString('base64url'),
 				SQLITE_PATH: databasePath,
-				PORT: String(port)
+				PORT: String(port),
+				API_URL: process.env.API_URL || `http://${urlHost}:${port}`,
+				FRONTEND_URL: process.env.FRONTEND_URL || `http://${urlHost}:5173`
 			},
 			true
 		);
@@ -98,31 +123,45 @@ async function main() {
 			);
 		});
 		const { server, io } = createMaple(config, db, printEmail);
+		const peerApp = express();
+		const peerServer = http.createServer(peerApp);
+		const peer = ExpressPeerServer(peerServer, { path: peerPath });
+		peer.on('error', (error) => console.error(`[PREVIEW] PeerJS error: ${error.message}`));
+		peerApp.use(peer);
 
 		let stopping = false;
 		const stop = (code: number) => {
 			if (stopping) return;
 			stopping = true;
+			peerServer.close();
+			peerServer.closeAllConnections();
 			io.close(() => {
 				cleanup();
 				console.log('[PREVIEW] Stopped and deleted the preview database.');
-				process.exitCode = code;
+				// PeerJS keeps internal timers running after its HTTP server closes.
+				process.exit(code);
 			});
 			server.closeAllConnections();
 		};
 		for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
 			process.once(signal, () => stop(0));
 		}
-		server.once('error', (error) => {
+		const handleServerError = (error: Error) => {
 			console.error(`[PREVIEW] Server error: ${describe(error)}`);
 			stop(1);
-		});
-		server.listen(port, host, () => {
-			console.log(`[PREVIEW] Disposable API running at ${config.apiURL} for ${config.frontendURL}`);
-			console.log(`[PREVIEW] Temporary database: ${databasePath}`);
-			console.log(`[PREVIEW] Test account: ${guest.username} / ${guest.password}`);
-			console.log(`[PREVIEW] Legacy account: ${legacy.username} / ${legacy.password}`);
-			console.log('[PREVIEW] Emails are printed here, not sent. Press Ctrl+C to stop.');
+		};
+		server.once('error', handleServerError);
+		peerServer.once('error', handleServerError);
+		peerServer.listen(peerPort, host, () => {
+			server.listen(port, host, () => {
+				console.log(`[PREVIEW] Listening on ${host}, ports ${port} and ${peerPort}`);
+				console.log(`[PREVIEW] Disposable API running at ${config.apiURL} for ${config.frontendURL}`);
+				console.log(`[PREVIEW] PeerJS running at http://${urlHost}:${peerPort}${peerPath}`);
+				console.log(`[PREVIEW] Temporary database: ${databasePath}`);
+				console.log(`[PREVIEW] Test account: ${guest.username} / ${guest.password}`);
+				console.log(`[PREVIEW] Legacy account: ${legacy.username} / ${legacy.password}`);
+				console.log('[PREVIEW] Emails are printed here, not sent. Press Ctrl+C to stop.');
+			});
 		});
 	} catch (error) {
 		cleanup();
