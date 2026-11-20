@@ -26,6 +26,11 @@ export interface TransferDecision {
     accepted: boolean
 }
 
+export interface TransferFinish {
+    transferId: string
+    outcome: 'completed' | 'failed'
+}
+
 export interface TransferReady {
     transferId: string
     peerId: string
@@ -37,7 +42,7 @@ export interface TransferCancel {
 
 export interface TransferEnded {
 	transferId: string;
-	reason: 'cancelled' | 'disconnected' | 'unauthorized' | 'expired';
+	reason: 'cancelled' | 'disconnected' | 'unauthorized' | 'expired' | 'completed' | 'failed';
 }
 
 export interface DeviceRegistration {
@@ -63,6 +68,10 @@ export interface PeerClientEvents {
     ) => void;
     'peer:ready': (
         request: TransferReady,
+        reply: (result: TransferReply) => void
+    ) => void
+    'peer:finish': (
+        request: TransferFinish,
         reply: (result: TransferReply) => void
     ) => void
 }

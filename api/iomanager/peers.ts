@@ -4,7 +4,7 @@ import type { MapleServer, MapleSocket } from "../types/socket.js";
 import { activeSession } from "../auth/session.js";
 import { accountRoom } from "./io.js";
 import { randomUUID } from "node:crypto";
-import { transferRequestSchema, deviceRegistrationSchema, transferDecisionSchema, transferCancelSchema, transferReadySchema } from "../validation/peer.js";
+import { transferRequestSchema, deviceRegistrationSchema, transferDecisionSchema, transferCancelSchema, transferReadySchema, transferFinishSchema } from "../validation/peer.js";
 
 const OFFER_EXPIRY_MS = 300_000; // 5 minutes until expiration
 
@@ -309,6 +309,53 @@ export class PeerManager {
 
 			pending.targetPeerId = peerId;
 			sender.emit('peer:connect', { transferId, peerId });
+			reply({ ok: true, transferId });
+		});
+
+		client.on('peer:finish', (request, reply) => {
+			if (typeof reply !== 'function') {
+				return;
+			}
+		
+			if (activeSession(this.db, user) === undefined) {
+				reply({ ok: false, error: 'Your session has expired.' });
+				client.disconnect(true);
+				return;
+			}
+		
+			const parsed = transferFinishSchema.safeParse(request);
+			if (!parsed.success) {
+				reply({ ok: false, error: 'Invalid transfer outcome.' });
+				return;
+			}
+
+			const { transferId, outcome } = parsed.data;
+			const pending = this.offers.get(transferId);
+
+			if (!pending || pending.accountId !== user.id) {
+				reply({ ok: false, error: 'Transfer not found.' });
+				return;
+			}
+		
+			const isRecipient = pending.targetSocketId === client.id;
+			const isSender = pending.senderSocketId === client.id;
+		
+			if (!isRecipient && !isSender) {
+				reply({ ok: false, error: 'This transfer belongs to another tab.' });
+				return;
+			}
+		
+			if (pending.status !== 'accepted') {
+				reply({ ok: false, error: 'This offer has not been accepted.' });
+				return;
+			}
+
+			if (outcome === 'completed' && (!isRecipient || pending.targetPeerId === undefined)) {
+				reply({ ok: false, error: 'Only the ready receiving tab can report completion.' });
+				return;
+			}
+
+			this.endTransfer(transferId, outcome);
 			reply({ ok: true, transferId });
 		});
 
