@@ -1,4 +1,6 @@
 <script lang="ts">
+	import ExternalLyrics from './ExternalLyrics.svelte';
+	import UserSettings from '$lib/preferences/usersettings';
 	import { onMount } from 'svelte';
 	import type { Song, Playlist, Album, Artist } from '$lib/types';
 	import { playlists } from '$lib/global.svelte';
@@ -370,24 +372,29 @@
 		class="scale-100 transform opacity-100 transition-all duration-100"
 	>
 		<div class="bg-surface-container border-outline min-w-48 rounded-xl border py-2 shadow-lg">
-			<button
-				onclick={handleDelete}
-				class="text-on-surface hover:bg-surface-container-high flex w-full items-center px-4 py-3 text-left transition-colors duration-150"
-			>
-				<svg
-					class="mr-3 flex-shrink-0"
-					xmlns="http://www.w3.org/2000/svg"
-					width="20"
-					height="20"
-					viewBox="0 0 24 24"
+			{#snippet deleteItem()}
+				<button
+					onclick={handleDelete}
+					class="text-on-surface hover:bg-surface-container-high flex w-full items-center px-4 py-3 text-left transition-colors duration-150"
 				>
-					<path
-						fill="currentColor"
-						d="M7 21q-.825 0-1.412-.587T5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413T17 21zM17 6H7v13h10zM9 17h2V8H9zm4 0h2V8h-2zM7 6v13z"
-					/>
-				</svg>
-				<span class="text-sm font-medium">Delete</span>
-			</button>
+					<svg
+						class="mr-3 flex-shrink-0"
+						xmlns="http://www.w3.org/2000/svg"
+						width="20"
+						height="20"
+						viewBox="0 0 24 24"
+					>
+						<path
+							fill="currentColor"
+							d="M7 21q-.825 0-1.412-.587T5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413T17 21zM17 6H7v13h10zM9 17h2V8H9zm4 0h2V8h-2zM7 6v13z"
+						/>
+					</svg>
+					<span class="text-sm font-medium">Delete</span>
+				</button>
+			{/snippet}
+			{#if type !== 'track'}
+				{@render deleteItem()}
+			{/if}
 
 			{#if type === 'playlist'}
 				<button
@@ -473,7 +480,6 @@
 					{/if}
 				</div>
 			{/if}
-
 			{#if type === 'track'}
 				<button
 					onclick={handleSendTrackToDevice}
@@ -484,6 +490,10 @@
 					</svg>
 					<span class="text-sm font-medium">Send to Device</span>
 				</button>
+				{#if track && UserSettings.preferences.addExternalLyrics}
+					<ExternalLyrics {track} onDone={() => (showMenu = false)} />
+				{/if}
+				{@render deleteItem()}
 			{/if}
 		</div>
 	</div>
