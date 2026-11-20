@@ -26,6 +26,11 @@ export interface TransferDecision {
     accepted: boolean
 }
 
+export interface TransferReady {
+    transferId: string
+    peerId: string
+}
+
 export interface TransferCancel {
 	transferId: string;
 }
@@ -56,6 +61,10 @@ export interface PeerClientEvents {
         request: TransferCancel,
         reply: (result: TransferReply) => void
     ) => void;
+    'peer:ready': (
+        request: TransferReady,
+        reply: (result: TransferReply) => void
+    ) => void
 }
 
 export interface PeerServerEvents {
@@ -63,4 +72,5 @@ export interface PeerServerEvents {
     'peer:incoming': (offer: TransferOffer) => void;
     'peer:decision': (decision: TransferDecision) => void;
     'peer:ended': (event: TransferEnded) => void;
+    'peer:connect': (event: TransferReady) => void;
 }

@@ -4,7 +4,7 @@ import type { MapleServer, MapleSocket } from "../types/socket.js";
 import { activeSession } from "../auth/session.js";
 import { accountRoom } from "./io.js";
 import { randomUUID } from "node:crypto";
-import { transferRequestSchema, deviceRegistrationSchema, transferDecisionSchema, transferCancelSchema } from "../validation/peer.js";
+import { transferRequestSchema, deviceRegistrationSchema, transferDecisionSchema, transferCancelSchema, transferReadySchema } from "../validation/peer.js";
 
 const OFFER_EXPIRY_MS = 300_000; // 5 minutes until expiration
 
@@ -18,6 +18,7 @@ interface PendingOffer {
 	offer: TransferOffer;
 	senderSocketId: string;
 	targetSocketId: string;
+	targetPeerId?: string;
 	status: 'pending' | 'accepted';
 	expiryTimer: ReturnType<typeof setTimeout>;
 }
@@ -253,6 +254,63 @@ export class PeerManager {
 
 			reply({ ok: true, transferId });
 		})
+
+		client.on('peer:ready', (request, reply) => {
+			if (typeof reply !== 'function') {
+				return;
+			}
+
+			if (activeSession(this.db, user) === undefined) {
+				reply({ ok: false, error: 'Your session has expired.' });
+				client.disconnect(true);
+				return;
+			}
+
+			const parsed = transferReadySchema.safeParse(request);
+			if (!parsed.success) {
+				reply({ ok: false, error: 'Invalid transfer readiness request.' });
+				return;
+			}
+
+			const { transferId, peerId } = parsed.data;
+			const pending = this.offers.get(transferId);
+
+			if (!pending || pending.accountId !== user.id) {
+				reply({ ok: false, error: 'Transfer offer not found.' });
+				return;
+			}
+		
+			if (pending.targetSocketId !== client.id || pending.status !== 'accepted') {
+				reply({ ok: false, error: 'Only the tab that accepted can mark this transfer ready.' });
+				return;
+			}
+		
+			if (pending.targetPeerId !== undefined) {
+				if (pending.targetPeerId === peerId) {
+					reply({ ok: true, transferId });
+				} else {
+					reply({ ok: false, error: 'This transfer already has a receiving peer.' });
+				}
+				return;
+			}
+
+			const sender = this.io.sockets.sockets.get(pending.senderSocketId);
+			if (!sender?.connected) {
+				this.endTransfer(transferId, 'disconnected');
+				reply({ ok: false, error: 'The sender is offline.' });
+				return;
+			}
+
+			if (sender.data.user.id !== user.id || activeSession(this.db, sender.data.user) === undefined) {
+				this.endTransfer(transferId, 'unauthorized');
+				reply({ ok: false, error: 'The sender is no longer authorized.' });
+				return;
+			}
+
+			pending.targetPeerId = peerId;
+			sender.emit('peer:connect', { transferId, peerId });
+			reply({ ok: true, transferId });
+		});
 
 		client.on('peer:cancel', (request, reply) => {
 			if (typeof reply !== 'function') {
