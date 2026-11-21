@@ -99,14 +99,16 @@ export type AckMessage = {
 	nextOffset: number;
 };
 
+export type StartMessage = {
+	type: 'start';
+	transferId: string;
+	size: number;
+	chunkSize: number;
+	sendWindow: number;
+};
+
 export type PeerMessage =
-	| {
-			type: 'start';
-			transferId: string;
-			size: number;
-			chunkSize: number;
-			sendWindow: number;
-	}
+	| StartMessage
 	| { type: 'chunk'; offset: number; bytes: ArrayBuffer }
 	| AckMessage
 	| { type: 'end'; sha256: string };

@@ -1,5 +1,5 @@
 import { Peer, type DataConnection } from 'peerjs';
-import type { PeerMessage, AckMessage } from './types';
+import type { PeerMessage, AckMessage, StartMessage } from './types';
 
 export const CHUNK_SIZE = 16 * 1024; // may change these later depending on speed
 export const SEND_WINDOW = 256 * 1024;
@@ -137,6 +137,53 @@ export async function sendChunks(
         await waitForProgress(() => ackedOffset === file.size);
     } finally {
         conn.off('data', onAck);
+    }
+}
+
+export async function receiveStart(
+    conn: DataConnection,
+    expected: { transferId: string, size: number },
+    prepare: () => Promise<void>
+): Promise<StartMessage> {
+    const start = await waitOnConnection<Partial<StartMessage>>(
+        conn, 
+        'data', 
+        'Timed out waiting for start message', 
+        (data) => // this ensures the message is actually a start message
+            data !== null &&
+            typeof data === 'object' &&
+            'type' in data &&
+            data.type === 'start'
+    );
+
+    if (
+        start.transferId !== expected.transferId ||
+        start.size !== expected.size ||
+        start.chunkSize !== CHUNK_SIZE ||
+        start.sendWindow !== SEND_WINDOW
+    ) {
+        throw new Error('The start message is not the same as the expected transfer!')
+    }
+
+    await prepare();
+
+    if (!conn.open) {
+        throw new Error('Connection closed before preparing');
+    }
+
+    // send the first ack
+    const ack: AckMessage = {
+        type: 'ack',
+        nextOffset: 0
+    };
+    await conn.send(ack);
+
+    return {
+        type: 'start',
+        transferId: expected.transferId,
+        size: expected.size,
+        chunkSize: CHUNK_SIZE,
+        sendWindow: SEND_WINDOW
     }
 }
 
