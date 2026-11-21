@@ -140,11 +140,29 @@ export async function sendChunks(
     }
 }
 
+export async function sendEnd(
+    conn: DataConnection,
+    sha256: string
+): Promise<void> {
+    if (!conn.open) throw new Error('Connection is not open');
+
+    // send checksum to make sure everything was received correctly
+    const message: PeerMessage = {
+        type: 'end',
+        sha256
+    };
+    await conn.send(message);
+}
+
 export async function receiveStart(
     conn: DataConnection,
     expected: { transferId: string, size: number },
     prepare: () => Promise<void>
 ): Promise<StartMessage> {
+    if (!Number.isSafeInteger(expected.size) || expected.size <= 0) {
+        throw new Error('Expected size must be above 0');
+    }
+
     const start = await waitOnConnection<Partial<StartMessage>>(
         conn, 
         'data', 
@@ -171,13 +189,6 @@ export async function receiveStart(
         throw new Error('Connection closed before preparing');
     }
 
-    // send the first ack
-    const ack: AckMessage = {
-        type: 'ack',
-        nextOffset: 0
-    };
-    await conn.send(ack);
-
     return {
         type: 'start',
         transferId: expected.transferId,
@@ -185,6 +196,128 @@ export async function receiveStart(
         chunkSize: CHUNK_SIZE,
         sendWindow: SEND_WINDOW
     }
+}
+
+const ACK_EVERY_BYTES = 64 * 1024;
+
+export function receiveChunks(
+    conn: DataConnection,
+    start: StartMessage,
+    write: (bytes: ArrayBuffer) => Promise<void>
+): Promise<string> {
+    return new Promise((resolve, reject) => {
+        let queueOffset = 0;
+        let ackedOffset = 0;
+        let writes = Promise.resolve();
+        let settled = false;
+        let awaitingEnd = false;
+        let endTimer: ReturnType<typeof setTimeout> | undefined;
+
+        function cleanup() {
+            settled = true;
+            clearTimeout(endTimer);
+            conn.off('data', onData);
+            conn.off('error', fail);
+            conn.off('close', onClose);
+        }
+
+        function finish(sha256: string) {
+            if (settled) return;
+            cleanup();
+            resolve(sha256);
+        }
+
+        function fail(error: unknown) {
+            if (settled) return;
+            cleanup();
+            reject(error);
+        }
+
+        function onClose() {
+            fail(new Error('Connection closed mid transfer'));
+        }
+
+        async function sendAck(nextOffset: number) {
+            if (!conn.open) throw new Error('Connection closed mid transfer');
+            ackedOffset = nextOffset;
+            const ack: AckMessage = {
+                type: 'ack',
+                nextOffset
+            };
+            await conn.send(ack);
+        }
+
+        function onData(data: unknown) {
+            if (settled) return;
+
+            if (data !== null && typeof data === 'object' && 'type' in data && data.type === 'end') {
+                if (
+                    !awaitingEnd ||
+                    !('sha256' in data) ||
+                    typeof data.sha256 !== 'string' ||
+                    !/^[a-f0-9]{64}$/i.test(data.sha256)
+                ) {
+                    fail(new Error('invalid end message'));
+                    return;
+                }
+                
+                finish(data.sha256.toLowerCase());
+                return;
+            }
+
+            if ( // verify the message is actually a chunk...
+                data === null ||
+                typeof data !== 'object' ||
+                !('type' in data) ||
+                data.type !== 'chunk' ||
+                !('offset' in data) ||
+                data.offset !== queueOffset ||
+                !('bytes' in data) ||
+                !(data.bytes instanceof ArrayBuffer)
+            ) {
+                fail(new Error('Received invalid chunk message'));
+                return;
+            }
+
+            const bytes = data.bytes;
+            const expectedLength = Math.min(CHUNK_SIZE, start.size - queueOffset);
+            const nextOffset = queueOffset + expectedLength;
+
+            if ( expectedLength <= 0 || bytes.byteLength !== expectedLength || nextOffset - ackedOffset > start.sendWindow) {
+                fail(new Error('Chunk is the wrong size'));
+                return;
+            }
+
+            // update the queue offset
+            queueOffset = nextOffset;
+
+            // write each chunk in the proper order
+            writes = writes.then(async () => {
+                if (settled) return;
+                await write(bytes);
+                if (settled) return;
+
+                const isLastChunk = nextOffset === start.size;
+                if (isLastChunk) {
+                    awaitingEnd = true;
+                    endTimer = setTimeout(() => {
+                        fail(new Error('Timed out waiting for end message'));
+                    }, CONNECT_TIMEOUT);
+                }
+
+                if (isLastChunk || nextOffset - ackedOffset >= ACK_EVERY_BYTES) {
+                    await sendAck(nextOffset);
+                }
+            }).catch(fail);
+        }
+
+        conn.on('data', onData);
+        conn.on('error', fail);
+        conn.on('close', onClose);
+
+        // send the first ack!!
+        void sendAck(0).catch(fail);
+    })
 }
 
 function waitOnConnection<T = void>(
