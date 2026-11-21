@@ -23,3 +23,13 @@ export const transferDecisionSchema = z.object({
 export const transferCancelSchema = z.object({
 	transferId: z.uuid()
 });
+
+export const transferReadySchema = z.object({
+	transferId: z.uuid(),
+	peerId: z.string().max(128).regex(/^[a-zA-Z0-9]+(?:[ _-][a-zA-Z0-9]+)*$/)
+});
+
+export const transferFinishSchema = z.object({
+	transferId: z.uuid(),
+	outcome: z.enum(['completed', 'failed'])
+});
