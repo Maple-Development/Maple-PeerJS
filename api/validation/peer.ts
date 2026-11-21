@@ -5,7 +5,7 @@ export const transferRequestSchema = z.object({
 	targetDeviceId: z.string().min(1).max(128),
 	file: z.object({
 		name: z.string().trim().min(1).max(255),
-		size: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+		size: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 		type: z.string().max(255)
 	})
 });

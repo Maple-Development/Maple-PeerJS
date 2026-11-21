@@ -93,3 +93,25 @@ export type Song = {
 	disk: number;
 	ext: string;
 };
+
+export type AckMessage = {
+	type: 'ack';
+	nextOffset: number;
+};
+
+export type TransferredTrackMetadata = Omit<Song, 'image'>;
+
+export type StartMessage = {
+	type: 'start';
+	transferId: string;
+	size: number;
+	chunkSize: number;
+	sendWindow: number;
+	track: TransferredTrackMetadata;
+};
+
+export type PeerMessage =
+	| StartMessage
+	| { type: 'chunk'; offset: number; bytes: ArrayBuffer }
+	| AckMessage
+	| { type: 'end'; sha256: string };
