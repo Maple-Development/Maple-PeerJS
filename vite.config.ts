@@ -54,6 +54,10 @@ export default defineConfig(({ mode }) => {
 			exclude: ['svelte']
 		},
 		server: {
+			// IPv4 only. On Windows "localhost" otherwise binds to ::1, and Firefox can't gather
+			// WebRTC candidates on a page loaded over IPv6 loopback, so device transfers fail there.
+			// `npm run dev -- --host` still overrides this for testing from other devices.
+			host: '127.0.0.1',
 			watch: {
 				usePolling: true
 			}

@@ -8,7 +8,9 @@ import type {
 	TransferOffer,
 	TransferReply
 } from '$shared/types/peer';
+import type { Peer } from 'peerjs';
 import type { MapleSocket } from './types';
+import { PEER_SERVER } from './api/server';
 import DeviceMessage from './components/DeviceMessage.svelte';
 
 const OFFER_TIMEOUT_MS = 10_000;
@@ -18,6 +20,8 @@ const NOTICE_MS = 5_000;
 const CANCELLED_BY_SENDER = 'This transfer was canceled by the sender.';
 const CANCELLED_BY_RECEIVER = 'This transfer was canceled by the receiver.';
 const ENDED_UNEXPECTEDLY = 'Sorry, this transfer ended unexpectedly!';
+const NO_PEER_SERVER = "Couldn't reach the transfer server.";
+const NO_CONNECTION = "Couldn't connect to the other device.";
 
 const DEVICE_ID_KEY = 'maple-transfer-device-id';
 // A name the user picked for this browser. Without one, a name is made from the browser and OS.
@@ -74,6 +78,39 @@ export interface OutgoingOffer {
 export const outgoingOffers = writable<OutgoingOffer[]>([]);
 
 let socket: MapleSocket | null = null;
+
+/**
+ * The Peer this tab opened for each accepted transfer, by transfer ID: the sender's once its
+ * offer is accepted, the receiver's once it accepts. Resolves when the Peer is open.
+ */
+const peers = new Map<string, Promise<Peer>>();
+
+/** Create this tab's Peer for a transfer and wait until the PeerServer has given it an ID. */
+function openPeer(transferId: string): Promise<Peer> {
+	const opening = (async () => {
+		// peerjs needs browser APIs, so it only loads once a transfer starts.
+		const { createPeer } = await import('./peerManager');
+		const peer = createPeer(PEER_SERVER);
+		await new Promise<void>((resolve, reject) => {
+			peer.once('open', () => resolve());
+			peer.once('error', (error) => {
+				peer.destroy();
+				reject(error);
+			});
+		});
+		return peer;
+	})();
+	peers.set(transferId, opening);
+	return opening;
+}
+
+/** Destroy this tab's Peer for a transfer, closing its connections. */
+function closePeer(transferId: string) {
+	const opening = peers.get(transferId);
+	if (!opening) return;
+	peers.delete(transferId);
+	opening.then((peer) => peer.destroy()).catch(() => {});
+}
 
 /**
  * One ID per browser, shared by all its tabs, so they show up as a single device.
@@ -175,6 +212,27 @@ export function watchDevices(client: MapleSocket) {
 		// The transfer popup takes over from the "waiting" notice.
 		updateOutgoing(transferId, (o) => ({ ...o, status: 'accepted' }));
 		toast.dismiss(transferId);
+		// The sender creates its Peer now that the offer is accepted. It connects once
+		// peer:connect brings the receiver's peer ID.
+		openPeer(transferId).catch(() => failOutgoing(transferId, NO_PEER_SERVER));
+	});
+
+	// The receiver's Peer is ready: connect to it and start the transfer.
+	client.on('peer:connect', async ({ transferId, peerId }) => {
+		const opening = peers.get(transferId);
+		if (!opening) return;
+		try {
+			const peer = await opening;
+			const { connectToPeer } = await import('./peerManager');
+			const conn = await connectToPeer(peer, peerId);
+			if (peers.get(transferId) !== opening) {
+				conn.close(); // ended while connecting
+				return;
+			}
+			// Connected to the receiving device: the file transfer starts here, over conn.
+		} catch {
+			failOutgoing(transferId, NO_CONNECTION);
+		}
 	});
 
 	// Sent to both sides whenever a transfer stops early, including to whoever stopped it.
@@ -194,6 +252,7 @@ export function watchDevices(client: MapleSocket) {
 }
 
 function removeOutgoing(transferId: string) {
+	closePeer(transferId);
 	outgoingOffers.update((offers) => offers.filter((o) => o.transferId !== transferId));
 }
 
@@ -203,8 +262,19 @@ function updateOutgoing(transferId: string, change: (offer: OutgoingOffer) => Ou
 	);
 }
 
+/**
+ * This device's Peer couldn't open or connect: show why in the transfer popup. Only the
+ * receiver calls peer:finish, so the sender doesn't report this to the server.
+ */
+function failOutgoing(transferId: string, error: string) {
+	closePeer(transferId);
+	updateOutgoing(transferId, (o) => (isOver(o) ? o : { ...o, status: 'failed', error }));
+}
+
 /** Say why an offer this device sent was ended by the other side (or the network). */
 function endOutgoing(offer: OutgoingOffer, reason: TransferEnded['reason']) {
+	// The server has dropped the transfer, so the Peer has nothing left to do.
+	closePeer(offer.transferId);
 	if (isOver(offer)) return;
 	// This device asked for it: the server ending it is the confirmation.
 	if (offer.cancelling) {
@@ -267,6 +337,8 @@ export function isOver(transfer: { status: string }): boolean {
 
 /** Keep an incoming offer the sender (or the network) ended on screen, saying why. */
 function endIncoming(id: string, reason: TransferEnded['reason']) {
+	// The server has dropped the transfer, so the Peer has nothing left to do.
+	closePeer(id);
 	const transfer = get(incomingTransfers).find((t) => t.offer.id === id);
 	// This device asked for it: the server ending it is the confirmation.
 	if (transfer?.cancelling) {
@@ -314,12 +386,50 @@ export async function answerOffer(id: string, accepted: boolean) {
 	// It may have failed meanwhile (e.g. the sender went offline); keep that reason.
 	if (get(incomingTransfers).find((t) => t.offer.id === id)?.status !== 'answering') return;
 
-	if (!reply.ok) updateIncoming(id, (t) => ({ ...t, status: 'failed', error: reply.error }));
-	else updateIncoming(id, (t) => ({ ...t, status: 'accepted' }));
+	if (!reply.ok) {
+		updateIncoming(id, (t) => ({ ...t, status: 'failed', error: reply.error }));
+		return;
+	}
+	updateIncoming(id, (t) => ({ ...t, status: 'accepted' }));
+	await startReceiving(id);
+}
+
+/**
+ * The receiver creates its Peer and, once it's open, sends its peer ID with peer:ready. The
+ * server passes that to the sender (peer:connect), which connects to it.
+ */
+async function startReceiving(id: string) {
+	const opening = openPeer(id);
+	let peer: Peer;
+	try {
+		peer = await opening;
+	} catch {
+		failIncoming(id, NO_PEER_SERVER);
+		return;
+	}
+	if (peers.get(id) !== opening) return; // ended while opening
+
+	peer.on('connection', () => {
+		// The sending device connected: the file transfer arrives over this connection. When it's
+		// done, call finishTransfer(id, 'completed') (or 'failed').
+	});
+
+	const reply = await request((client, ack) =>
+		client.timeout(OFFER_TIMEOUT_MS).emit('peer:ready', { transferId: id, peerId: peer.id }, ack)
+	);
+	if (!reply.ok) failIncoming(id, reply.error);
+}
+
+/** The receiver's side of the transfer broke: show why, and report it with peer:finish. */
+function failIncoming(id: string, error: string) {
+	closePeer(id);
+	updateIncoming(id, (t) => (isOver(t) ? t : { ...t, status: 'failed', error }));
+	void finishTransfer(id, 'failed');
 }
 
 /** Take an answered or failed offer off the screen. */
 export function closeIncoming(id: string) {
+	closePeer(id);
 	incomingTransfers.update((list) => list.filter((t) => t.offer.id !== id));
 }
 
@@ -451,6 +561,19 @@ export function closeOutgoing(transferId: string) {
 function cancelTransfer(transferId: string): Promise<TransferReply> {
 	return request((client, ack) =>
 		client.timeout(OFFER_TIMEOUT_MS).emit('peer:cancel', { transferId }, ack)
+	);
+}
+
+/**
+ * The receiver tells the server the transfer is done (peer:finish), and how it went. The server
+ * then ends it for both devices with peer:ended.
+ */
+export function finishTransfer(
+	transferId: string,
+	outcome: 'completed' | 'failed'
+): Promise<TransferReply> {
+	return request((client, ack) =>
+		client.timeout(OFFER_TIMEOUT_MS).emit('peer:finish', { transferId, outcome }, ack)
 	);
 }
 
