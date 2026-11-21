@@ -311,13 +311,16 @@ export async function receiveChunks(
                 !('offset' in data) ||
                 data.offset !== queueOffset ||
                 !('bytes' in data) ||
-                !(data.bytes instanceof ArrayBuffer)
+                !(data.bytes instanceof ArrayBuffer || ArrayBuffer.isView(data.bytes))
             ) {
                 fail(new Error('Received invalid chunk message'));
                 return;
             }
 
-            const bytes = data.bytes;
+            const payload = data.bytes;
+            const bytes = payload instanceof ArrayBuffer
+                ? payload
+                : new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength).slice().buffer;
             const expectedLength = Math.min(CHUNK_SIZE, start.size - queueOffset);
             const nextOffset = queueOffset + expectedLength;
 
