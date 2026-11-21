@@ -1,5 +1,6 @@
 import { Peer, type DataConnection } from 'peerjs';
 import type { PeerMessage, AckMessage, StartMessage } from './types';
+import { createSHA256 } from 'hash-wasm';
 
 export const CHUNK_SIZE = 16 * 1024; // may change these later depending on speed
 export const SEND_WINDOW = 256 * 1024;
@@ -90,7 +91,8 @@ export async function sendChunks(
     conn: DataConnection,
     file: Blob,
     onProgress?: (writtenBytes: number) => void
-): Promise<void> {
+): Promise<string> {
+    const hash = await createSHA256();
     let sentOffset = 0;
     let ackedOffset = 0;
 
@@ -124,6 +126,8 @@ export async function sendChunks(
 
             const bytes = await file.slice(offset, end).arrayBuffer();
             if (!conn.open) throw new Error('Connection closed mid chunk');
+            
+            hash.update(new Uint8Array(bytes));
 
             sentOffset = end;
             const message: PeerMessage = {
@@ -135,6 +139,7 @@ export async function sendChunks(
         }
 
         await waitForProgress(() => ackedOffset === file.size);
+        return hash.digest('hex');
     } finally {
         conn.off('data', onAck);
     }
@@ -200,11 +205,12 @@ export async function receiveStart(
 
 const ACK_EVERY_BYTES = 64 * 1024;
 
-export function receiveChunks(
+export async function receiveChunks(
     conn: DataConnection,
     start: StartMessage,
     write: (bytes: ArrayBuffer) => Promise<void>
 ): Promise<string> {
+    const hash = await createSHA256();
     return new Promise((resolve, reject) => {
         let queueOffset = 0;
         let ackedOffset = 0;
@@ -260,8 +266,13 @@ export function receiveChunks(
                     fail(new Error('invalid end message'));
                     return;
                 }
-                
-                finish(data.sha256.toLowerCase());
+
+                const expected = data.sha256.toLowerCase();
+                if (hash.digest('hex') !== expected) {
+                    fail(new Error('Checksum mismatch'));
+                    return;
+                }
+                finish(expected);
                 return;
             }
 
@@ -294,6 +305,7 @@ export function receiveChunks(
             // write each chunk in the proper order
             writes = writes.then(async () => {
                 if (settled) return;
+                hash.update(new Uint8Array(bytes));
                 await write(bytes);
                 if (settled) return;
 
