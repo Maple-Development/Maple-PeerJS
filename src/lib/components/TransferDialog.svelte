@@ -132,7 +132,7 @@
 	// The right-hand button once everything has arrived: the receiver keeps the track, the
 	// sender is simply done.
 	function finish(id: string) {
-		if (incoming) void confirmIncoming(id);
+		if (incoming) confirmIncoming(id);
 		else closeOutgoing(id);
 	}
 
@@ -196,6 +196,7 @@
 			</div>
 
 			{#if current.status === 'accepted'}
+				<!-- Placeholder: nothing updates the byte counts until the file transfer is built. -->
 				<div class="flex flex-col gap-2">
 					<LinearProgress {percent} />
 					<div class="text-on-surface-variant flex justify-between gap-3 text-xs">
@@ -227,14 +228,11 @@
 			<Button variant="filled" disabled={busy} onclick={() => answerOffer(id, true)}>Accept</Button>
 		{:else if current?.status === 'accepted'}
 			{@const id = current.id}
-			<!-- Cancel works until the whole file is across; after that the sender has nothing left
-			     to cancel, while the receiver can still throw the file away. The other button only
-			     works once the whole file is across. Both wait while the server confirms a cancel. -->
-			{#if incoming || !current.done}
-				<Button variant="text" disabled={current.cancelling} onclick={() => cancel(id)}
-					>{current.cancelling ? 'Canceling…' : 'Cancel'}</Button
-				>
-			{/if}
+			<!-- Cancel works at any point; the other button only once the whole file is across.
+			     Both wait while the server confirms a cancel. -->
+			<Button variant="text" disabled={current.cancelling} onclick={() => cancel(id)}
+				>{current.cancelling ? 'Canceling…' : 'Cancel'}</Button
+			>
 			<Button
 				variant="filled"
 				disabled={!current.done || current.cancelling}
