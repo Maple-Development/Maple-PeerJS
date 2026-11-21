@@ -1,11 +1,30 @@
 import { Peer, type DataConnection } from 'peerjs';
-import type { PeerMessage, AckMessage, StartMessage } from './types';
+import type { PeerMessage, AckMessage, StartMessage, TransferredTrackMetadata } from './types';
 import { createSHA256 } from 'hash-wasm';
+import * as z from 'zod';
 
 export const CHUNK_SIZE = 16 * 1024; // may change these later depending on speed
 export const SEND_WINDOW = 256 * 1024;
 
 const CONNECT_TIMEOUT = 15_000;
+
+const transferredTrackSchema = z.object({
+	id: z.uuid(),
+	title: z.string(),
+	artist: z.string(),
+	album: z.string(),
+	year: z.number(),
+	genre: z.string().nullish().transform((value) => value ?? undefined),
+	fileName: z.string(),
+	duration: z.number().nonnegative(),
+	trackNumber: z.number(),
+	disk: z.number(),
+	ext: z.string().regex(/^[a-z0-9]{1,10}$/i),
+	lyrics: z.array(z.object({
+		text: z.string(),
+		time: z.number().nullish().transform((value) => value ?? undefined)
+	})).nullish().transform((value) => value ?? undefined)
+});
 
 export function createPeer(serverUrl: string) {
     const url = new URL(serverUrl);
@@ -45,7 +64,8 @@ export async function connectToPeer(peer: Peer, peerId: string) : Promise<DataCo
 export async function sendStart(
     conn: DataConnection,
     transferId: string,
-    size: number
+    size: number,
+    track: TransferredTrackMetadata
 ): Promise<void> {
     if (!conn.open) {
         throw new Error('Connection is not open');
@@ -56,7 +76,8 @@ export async function sendStart(
         transferId,
         size,
         chunkSize: CHUNK_SIZE,
-        sendWindow: SEND_WINDOW
+        sendWindow: SEND_WINDOW,
+        track
     };
 
     const ackPromise = waitForAck(conn, 0)
@@ -188,6 +209,11 @@ export async function receiveStart(
         throw new Error('The start message is not the same as the expected transfer!')
     }
 
+    const parsedTrack = transferredTrackSchema.safeParse(start.track);
+    if (!parsedTrack.success) {
+        throw new Error('The track metadata is invalid');
+    }
+
     await prepare();
 
     if (!conn.open) {
@@ -199,7 +225,8 @@ export async function receiveStart(
         transferId: expected.transferId,
         size: expected.size,
         chunkSize: CHUNK_SIZE,
-        sendWindow: SEND_WINDOW
+        sendWindow: SEND_WINDOW,
+        track: parsedTrack.data
     }
 }
 

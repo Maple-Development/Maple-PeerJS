@@ -30,6 +30,7 @@ export class OPFS {
 	private static deferJsonWrites = false;
 	private static pendingTrackRead: Promise<Song[]> | undefined;
 	private static pendingTrackWrite = Promise.resolve();
+	private static pendingImport: Promise<void> = Promise.resolve();
 
 	private static async writeCache<T>(path: string, cache: T[]): Promise<void> {
 		if (this.deferJsonWrites) return;
@@ -57,6 +58,28 @@ export class OPFS {
 		);
 		this.pendingTrackWrite = pending.catch(() => {});
 		await pending;
+	}
+
+	public static async withImportLock<T>(importTracks: () => Promise<T>): Promise<T> {
+		const run = async () => {
+			await this.initializeLibrary();
+			await this.pendingTrackRead;
+			await this.pendingTrackWrite;
+			[this.tracksCache, this.albumsCache, this.artistsCache] = await Promise.all([
+				this.getCache<Song>('/tracks/tracks.json', null),
+				this.getCache<Album>('/albums/albums.json', null),
+				this.getCache<Artist>('/artists/artists.json', null)
+			]);
+			return importTracks();
+		};
+
+		if (typeof navigator !== 'undefined' && navigator.locks) {
+			return navigator.locks.request('maple-library-import', run);
+		}
+
+		const pending = this.pendingImport.then(run);
+		this.pendingImport = pending.then(() => {}, () => {});
+		return pending;
 	}
 
 	public static async beginImport(): Promise<void> {
@@ -245,7 +268,9 @@ export class OPFS {
 	public static async addAlbum(album: Album, id: string) {
 		this.albumsCache = await this.getCache('/albums/albums.json', this.albumsCache);
 
-		const existingAlbum = this.albumsCache.find((a) => a.name === album.name);
+		const existingAlbum = this.albumsCache.find(
+			(entry) => entry.name === album.name && entry.artist === album.artist
+		);
 		if (existingAlbum) {
 			if (!existingAlbum.tracks) {
 				existingAlbum.tracks = [];

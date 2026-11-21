@@ -2,9 +2,9 @@ import { embeddedLyrics } from '$lib/lyrics';
 import { parseBlob, parseBuffer } from 'music-metadata';
 import { OPFS } from '$lib/opfs';
 import { toast } from 'svelte-sonner';
-import { v4 as uuidv4 } from 'uuid';
+import { v4 as uuidv4, validate as isUuid } from 'uuid';
 import { writable } from 'svelte/store';
-import type { Song, Album, Artist } from '$lib/types';
+import type { Song, Album, Artist, TransferredTrackMetadata } from '$lib/types';
 import UserSettings from '$lib/preferences/usersettings';
 import { refreshLibrary } from '$lib/global.svelte';
 import { statsManager } from '$lib/stats';
@@ -101,6 +101,63 @@ async function parseMetadataFast(file: File) {
 	return parseMetadataWithTimeout(file);
 }
 
+export async function importTransferredTrack(
+	audio: File,
+	metadata: TransferredTrackMetadata,
+	artwork?: Blob
+): Promise<'imported' | 'already-exists'> {
+	if (!isUuid(metadata.id) || !/^[a-z0-9]{1,10}$/i.test(metadata.ext)) {
+		throw new Error('Invalid track ID or file extension.');
+	}
+
+	return OPFS.withImportLock(() => saveTransferredTrack(audio, metadata, artwork));
+}
+
+async function saveTransferredTrack(
+	audio: File,
+	metadata: TransferredTrackMetadata,
+	artwork?: Blob
+): Promise<'imported' | 'already-exists'> {
+	if (await OPFS.get().track(metadata.id)) return 'already-exists';
+
+	if (await OPFS.hasTrack(metadata.title, metadata.artist)) { //TODO: later I want to show a screen that lets the user choose whether to overwrite or import a duplicate
+		throw new Error('A track with this title and artist already has a different ID.');
+	}
+	const picture = artwork ? undefined : (await parseMetadataFast(audio))?.common.picture?.[0];
+	const cover = artwork ?? (picture
+		? new Blob([picture.data.slice()], { type: picture.format })
+		: await (await fetch('/placeholder.png')).blob());
+
+	const track: Song = { ...metadata, image: cover };
+	const storedAudio = new File([audio], `track.${track.ext}`, { type: audio.type });
+
+	try {
+		await OPFS.addFile(track.id, storedAudio);
+
+		if (!(await OPFS.addTrack(track))) {
+			throw new Error('A track with this title and artist already exists.');
+		}
+
+		await OPFS.addAlbum({
+			id: uuidv4(),
+			name: track.album,
+			artist: track.artist,
+			year: track.year,
+			genre: track.genre,
+			image: cover
+		}, track.id);
+
+		await OPFS.addArtist({ id: uuidv4(), name: track.artist }, track.id, track.album);
+	} catch (error) {
+		await OPFS.discardImportedTrack(track).catch(() => {});
+		throw error;
+	}
+
+	statsManager.recordLibraryAdd(track.id);
+	await refreshLibrary();
+	return 'imported';
+}
+
 export async function createLibrary(mobileFiles?: FileList | File[]): Promise<void> {
 	if (mobileFiles === undefined) {
 		iosImportOpen.set(true);
@@ -112,7 +169,6 @@ export async function createLibrary(mobileFiles?: FileList | File[]): Promise<vo
 	try {
 		const sampleImage = await fetch('/placeholder.png');
 		const blob = await sampleImage.blob();
-		await OPFS.initializeLibrary();
 
 		const handleFiles = async (files: FileList | File[]) => {
 			if (!files || files.length === 0) {
@@ -241,7 +297,7 @@ export async function createLibrary(mobileFiles?: FileList | File[]): Promise<vo
 			}
 		};
 
-		await handleFiles(selected);
+		await OPFS.withImportLock(() => handleFiles(selected));
 	} catch (error) {
 		console.error('Error in createLibrary:', error);
 		if (error instanceof Error) {

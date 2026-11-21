@@ -99,12 +99,15 @@ export type AckMessage = {
 	nextOffset: number;
 };
 
+export type TransferredTrackMetadata = Omit<Song, 'image'>;
+
 export type StartMessage = {
 	type: 'start';
 	transferId: string;
 	size: number;
 	chunkSize: number;
 	sendWindow: number;
+	track: TransferredTrackMetadata;
 };
 
 export type PeerMessage =
