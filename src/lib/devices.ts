@@ -8,7 +8,7 @@ import type {
 	TransferOffer,
 	TransferReply
 } from '$shared/types/peer';
-import type { Peer } from 'peerjs';
+import type { DataConnection, Peer } from 'peerjs';
 import type { MapleSocket } from './types';
 import { PEER_SERVER } from './api/server';
 import DeviceMessage from './components/DeviceMessage.svelte';
@@ -22,6 +22,7 @@ const CANCELLED_BY_RECEIVER = 'This transfer was canceled by the receiver.';
 const ENDED_UNEXPECTEDLY = 'Sorry, this transfer ended unexpectedly!';
 const NO_PEER_SERVER = "Couldn't reach the transfer server.";
 const NO_CONNECTION = "Couldn't connect to the other device.";
+const NO_RESPONSE = 'The other device stopped responding.';
 
 const DEVICE_ID_KEY = 'maple-transfer-device-id';
 // A name the user picked for this browser. Without one, a name is made from the browser and OS.
@@ -64,7 +65,9 @@ export interface OutgoingOffer {
 	status: 'pending' | 'accepted' | 'cancelled' | 'failed';
 	/** What notices call the file, e.g. the track's title. */
 	label: string;
-	/** Bytes sent so far. Nothing fills this in until the file transfer exists. */
+	/** The file itself (OPFS.getSong), sent once the other device's Peer is connected. */
+	data: Blob;
+	/** Bytes the receiver has acknowledged so far (from sendChunks). */
 	sent: number;
 	/** This device asked the server to cancel and is waiting for it to confirm. */
 	cancelling?: boolean;
@@ -220,18 +223,32 @@ export function watchDevices(client: MapleSocket) {
 	// The receiver's Peer is ready: connect to it and start the transfer.
 	client.on('peer:connect', async ({ transferId, peerId }) => {
 		const opening = peers.get(transferId);
-		if (!opening) return;
+		const data = get(outgoingOffers).find((o) => o.transferId === transferId)?.data;
+		if (!opening || !data) return;
+
+		const { connectToPeer, sendStart, sendChunks } = await import('./peerManager');
+		let conn: DataConnection;
 		try {
-			const peer = await opening;
-			const { connectToPeer } = await import('./peerManager');
-			const conn = await connectToPeer(peer, peerId);
-			if (peers.get(transferId) !== opening) {
-				conn.close(); // ended while connecting
-				return;
-			}
-			// Connected to the receiving device: the file transfer starts here, over conn.
+			conn = await connectToPeer(await opening, peerId);
 		} catch {
 			failOutgoing(transferId, NO_CONNECTION);
+			return;
+		}
+		if (peers.get(transferId) !== opening) {
+			conn.close(); // ended while connecting
+			return;
+		}
+
+		try {
+			// Tell the receiver what's coming and wait for its ack (nextOffset 0).
+			await sendStart(conn, transferId, data.size);
+			// Send the file; resolves once the receiver has acked every byte. The acks drive the
+			// popup's progress bar.
+			await sendChunks(conn, data, (bytes) =>
+				updateOutgoing(transferId, (o) => ({ ...o, sent: bytes }))
+			);
+		} catch {
+			if (peers.get(transferId) === opening) failOutgoing(transferId, NO_RESPONSE);
 		}
 	});
 
@@ -322,7 +339,7 @@ function endOutgoing(offer: OutgoingOffer, reason: TransferEnded['reason']) {
 }
 
 async function retryOffer(offer: OutgoingOffer) {
-	const reply = await sendOffer(offer.target, offer.file, offer.label);
+	const reply = await sendOffer(offer.target, offer.file, offer.data, offer.label);
 	if (!reply.ok) toast.error(reply.error);
 }
 
@@ -391,14 +408,15 @@ export async function answerOffer(id: string, accepted: boolean) {
 		return;
 	}
 	updateIncoming(id, (t) => ({ ...t, status: 'accepted' }));
-	await startReceiving(id);
+	await startReceiving(transfer.offer);
 }
 
 /**
  * The receiver creates its Peer and, once it's open, sends its peer ID with peer:ready. The
  * server passes that to the sender (peer:connect), which connects to it.
  */
-async function startReceiving(id: string) {
+async function startReceiving(offer: TransferOffer) {
+	const id = offer.id;
 	const opening = openPeer(id);
 	let peer: Peer;
 	try {
@@ -409,9 +427,27 @@ async function startReceiving(id: string) {
 	}
 	if (peers.get(id) !== opening) return; // ended while opening
 
-	peer.on('connection', () => {
-		// The sending device connected: the file transfer arrives over this connection. When it's
-		// done, call finishTransfer(id, 'completed') (or 'failed').
+	// Loaded before listening, so nothing is awaited between the sender connecting and
+	// receiveStart listening for its start message.
+	const { receiveStart } = await import('./peerManager');
+	let connected = false;
+
+	peer.on('connection', async (conn) => {
+		// Only the sender of this offer gets this peer ID, and only one connection is used.
+		if (connected) {
+			conn.close();
+			return;
+		}
+		connected = true;
+		try {
+			// Check the sender's start message against the offer, then ack it (nextOffset 0).
+			await receiveStart(conn, { transferId: id, size: offer.file.size }, async () => {
+				// Nothing to set up yet: storage for the incoming chunks goes here.
+			});
+			// TODO: receive the chunks, then call finishTransfer(id, 'completed').
+		} catch {
+			if (peers.get(id) === opening) failIncoming(id, ENDED_UNEXPECTEDLY);
+		}
 	});
 
 	const reply = await request((client, ack) =>
@@ -491,13 +527,15 @@ function request(send: (client: MapleSocket, ack: Ack) => void): Promise<Transfe
 }
 
 /**
- * Offer a file to another of this account's devices, called `label` in notices. On success
+ * Offer a file (`data`, described by `file`) to another of this account's devices, called
+ * `label` in notices. `data` is kept with the offer and sent once it's accepted. On success
  * the offer is tracked in `outgoingOffers` and a "waiting" notice stays up until the other
  * device answers. On failure the caller decides how to show the error.
  */
 export async function sendOffer(
 	target: OwnDevice,
 	file: TransferFile,
+	data: Blob,
 	label = file.name
 ): Promise<TransferReply> {
 	const reply = await request((client, ack) =>
@@ -508,7 +546,7 @@ export async function sendOffer(
 	const { transferId } = reply;
 	outgoingOffers.update((offers) => [
 		...offers,
-		{ transferId, target, file, label, status: 'pending', sent: 0 }
+		{ transferId, target, file, data, label, status: 'pending', sent: 0 }
 	]);
 	// Stays up until the other device answers. peer:decision then swaps it for the transfer
 	// popup, or endOutgoing replaces it (same id) if the offer is declined, expires or drops.

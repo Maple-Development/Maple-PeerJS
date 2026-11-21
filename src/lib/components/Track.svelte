@@ -319,8 +319,7 @@
 			toast.error(`Couldn't read "${track.title}" from this device.`);
 			return;
 		}
-		// Only the offer so far: devices.ts reports whether the other device accepts, but the
-		// audio itself isn't sent yet.
+		// The file goes with the offer; devices.ts sends it once the other device accepts.
 		const reply = await sendOffer(
 			device,
 			{
@@ -328,6 +327,7 @@
 				size: file.size,
 				type: file.type
 			},
+			file,
 			track.title
 		);
 		if (!reply.ok) toast.error(reply.error);
