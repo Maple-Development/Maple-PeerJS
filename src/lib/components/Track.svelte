@@ -328,6 +328,7 @@
 				type: file.type
 			},
 			file,
+			track,
 			track.title
 		);
 		if (!reply.ok) toast.error(reply.error);

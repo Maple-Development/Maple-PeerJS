@@ -9,7 +9,7 @@ import type {
 	TransferReply
 } from '$shared/types/peer';
 import type { DataConnection, Peer } from 'peerjs';
-import type { MapleSocket } from './types';
+import type { MapleSocket, Song, TransferredTrackMetadata } from './types';
 import { PEER_SERVER } from './api/server';
 import DeviceMessage from './components/DeviceMessage.svelte';
 
@@ -23,6 +23,7 @@ const ENDED_UNEXPECTEDLY = 'Sorry, this transfer ended unexpectedly!';
 const NO_PEER_SERVER = "Couldn't reach the transfer server.";
 const NO_CONNECTION = "Couldn't connect to the other device.";
 const NO_RESPONSE = 'The other device stopped responding.';
+const CORRUPTED = 'The file arrived damaged.';
 
 const DEVICE_ID_KEY = 'maple-transfer-device-id';
 // A name the user picked for this browser. Without one, a name is made from the browser and OS.
@@ -43,8 +44,10 @@ export interface IncomingTransfer {
 	 * failed: it ended some other way. `error` says why for the last two.
 	 */
 	status: 'pending' | 'answering' | 'accepted' | 'cancelled' | 'failed';
-	/** Bytes received so far. Nothing fills this in until the file transfer exists. */
+	/** Bytes received so far (from receiveChunks). */
 	received: number;
+	/** The whole file arrived, its checksum matched, and the server confirmed (peer:ended). */
+	completed?: boolean;
 	/** This device asked the server to cancel and is waiting for it to confirm. */
 	cancelling?: boolean;
 	error?: string;
@@ -67,8 +70,12 @@ export interface OutgoingOffer {
 	label: string;
 	/** The file itself (OPFS.getSong), sent once the other device's Peer is connected. */
 	data: Blob;
+	/** The track's library entry (minus its artwork), sent in the start message. */
+	track: TransferredTrackMetadata;
 	/** Bytes the receiver has acknowledged so far (from sendChunks). */
 	sent: number;
+	/** The receiver checked the file and reported it complete (peer:ended with 'completed'). */
+	completed?: boolean;
 	/** This device asked the server to cancel and is waiting for it to confirm. */
 	cancelling?: boolean;
 	error?: string;
@@ -87,6 +94,9 @@ let socket: MapleSocket | null = null;
  * offer is accepted, the receiver's once it accepts. Resolves when the Peer is open.
  */
 const peers = new Map<string, Promise<Peer>>();
+
+/** Files that fully arrived and checked out, kept until the user confirms or closes them. */
+const receivedFiles = new Map<string, { audio: Blob; track: TransferredTrackMetadata }>();
 
 /** Create this tab's Peer for a transfer and wait until the PeerServer has given it an ID. */
 function openPeer(transferId: string): Promise<Peer> {
@@ -223,10 +233,11 @@ export function watchDevices(client: MapleSocket) {
 	// The receiver's Peer is ready: connect to it and start the transfer.
 	client.on('peer:connect', async ({ transferId, peerId }) => {
 		const opening = peers.get(transferId);
-		const data = get(outgoingOffers).find((o) => o.transferId === transferId)?.data;
-		if (!opening || !data) return;
+		const offer = get(outgoingOffers).find((o) => o.transferId === transferId);
+		if (!opening || !offer) return;
+		const { data, track } = offer;
 
-		const { connectToPeer, sendStart, sendChunks } = await import('./peerManager');
+		const { connectToPeer, sendStart, sendChunks, sendEnd } = await import('./peerManager');
 		let conn: DataConnection;
 		try {
 			conn = await connectToPeer(await opening, peerId);
@@ -240,13 +251,17 @@ export function watchDevices(client: MapleSocket) {
 		}
 
 		try {
-			// Tell the receiver what's coming and wait for its ack (nextOffset 0).
-			await sendStart(conn, transferId, data.size);
-			// Send the file; resolves once the receiver has acked every byte. The acks drive the
-			// popup's progress bar.
-			await sendChunks(conn, data, (bytes) =>
+			// Tell the receiver what's coming (with the track's metadata) and wait for its ack
+			// (nextOffset 0).
+			await sendStart(conn, transferId, data.size, track);
+			// Send the file; resolves with its SHA-256 once the receiver has acked every byte. The
+			// acks drive the popup's progress bar.
+			const checksum = await sendChunks(conn, data, (bytes) =>
 				updateOutgoing(transferId, (o) => ({ ...o, sent: bytes }))
 			);
+			// The receiver checks the file against this, then reports it with peer:finish. The
+			// server's peer:ended (reason 'completed') marks it done here.
+			await sendEnd(conn, checksum);
 		} catch {
 			if (peers.get(transferId) === opening) failOutgoing(transferId, NO_RESPONSE);
 		}
@@ -280,19 +295,29 @@ function updateOutgoing(transferId: string, change: (offer: OutgoingOffer) => Ou
 }
 
 /**
- * This device's Peer couldn't open or connect: show why in the transfer popup. Only the
- * receiver calls peer:finish, so the sender doesn't report this to the server.
+ * Sending broke on this device: show why in the transfer popup. Only the receiver calls
+ * peer:finish, so the sender doesn't report this to the server; closing the Peer drops the
+ * connection, which the receiver notices.
  */
 function failOutgoing(transferId: string, error: string) {
 	closePeer(transferId);
-	updateOutgoing(transferId, (o) => (isOver(o) ? o : { ...o, status: 'failed', error }));
+	updateOutgoing(transferId, (o) =>
+		isOver(o) || o.completed ? o : { ...o, status: 'failed', error }
+	);
 }
 
 /** Say why an offer this device sent was ended by the other side (or the network). */
 function endOutgoing(offer: OutgoingOffer, reason: TransferEnded['reason']) {
 	// The server has dropped the transfer, so the Peer has nothing left to do.
 	closePeer(offer.transferId);
-	if (isOver(offer)) return;
+	// Once it's done, the other device going offline afterwards doesn't undo it.
+	if (isOver(offer) || offer.completed) return;
+	// The receiver checked the file and reported it with peer:finish. The popup's Done button
+	// takes it from here.
+	if (reason === 'completed') {
+		updateOutgoing(offer.transferId, (o) => ({ ...o, completed: true, sent: o.file.size }));
+		return;
+	}
 	// This device asked for it: the server ending it is the confirmation.
 	if (offer.cancelling) {
 		removeOutgoing(offer.transferId);
@@ -339,7 +364,7 @@ function endOutgoing(offer: OutgoingOffer, reason: TransferEnded['reason']) {
 }
 
 async function retryOffer(offer: OutgoingOffer) {
-	const reply = await sendOffer(offer.target, offer.file, offer.data, offer.label);
+	const reply = await sendOffer(offer.target, offer.file, offer.data, offer.track, offer.label);
 	if (!reply.ok) toast.error(reply.error);
 }
 
@@ -357,6 +382,15 @@ function endIncoming(id: string, reason: TransferEnded['reason']) {
 	// The server has dropped the transfer, so the Peer has nothing left to do.
 	closePeer(id);
 	const transfer = get(incomingTransfers).find((t) => t.offer.id === id);
+	// It already arrived; the sender going offline afterwards doesn't take it back.
+	if (transfer?.completed) return;
+	// This tab reported it complete with peer:finish; this is the server confirming it.
+	if (reason === 'completed') {
+		if (transfer && !isOver(transfer)) {
+			updateIncoming(id, (t) => ({ ...t, completed: true, received: t.offer.file.size }));
+		}
+		return;
+	}
 	// This device asked for it: the server ending it is the confirmation.
 	if (transfer?.cancelling) {
 		closeIncoming(id);
@@ -429,7 +463,7 @@ async function startReceiving(offer: TransferOffer) {
 
 	// Loaded before listening, so nothing is awaited between the sender connecting and
 	// receiveStart listening for its start message.
-	const { receiveStart } = await import('./peerManager');
+	const { receiveStart, receiveChunks } = await import('./peerManager');
 	let connected = false;
 
 	peer.on('connection', async (conn) => {
@@ -439,14 +473,38 @@ async function startReceiving(offer: TransferOffer) {
 			return;
 		}
 		connected = true;
+
+		const chunks: ArrayBuffer[] = [];
+		let track: TransferredTrackMetadata;
 		try {
-			// Check the sender's start message against the offer, then ack it (nextOffset 0).
-			await receiveStart(conn, { transferId: id, size: offer.file.size }, async () => {
-				// Nothing to set up yet: storage for the incoming chunks goes here.
+			// Check the sender's start message against the offer, and validate the track metadata
+			// it carries.
+			const start = await receiveStart(conn, { transferId: id, size: offer.file.size }, async () => {
+				// Nothing to set up: the chunks are kept in memory until the end message.
 			});
-			// TODO: receive the chunks, then call finishTransfer(id, 'completed').
-		} catch {
-			if (peers.get(id) === opening) failIncoming(id, ENDED_UNEXPECTEDLY);
+			track = start.track;
+			// Ack the start (nextOffset 0), take the chunks in order, and wait for the end message.
+			// Resolves once the file's SHA-256 matches the sender's (otherwise 'Checksum mismatch').
+			let received = 0;
+			await receiveChunks(conn, start, async (bytes) => {
+				chunks.push(bytes);
+				received += bytes.byteLength;
+				updateIncoming(id, (t) => ({ ...t, received }));
+			});
+		} catch (error) {
+			if (peers.get(id) !== opening) return;
+			const mismatch = error instanceof Error && error.message === 'Checksum mismatch';
+			failIncoming(id, mismatch ? CORRUPTED : ENDED_UNEXPECTEDLY);
+			return;
+		}
+		if (peers.get(id) !== opening) return; // ended meanwhile
+
+		// The transfer is done: report it. The server answers both devices with peer:ended
+		// ('completed'), which marks it complete in endIncoming / endOutgoing.
+		receivedFiles.set(id, { audio: new Blob(chunks, { type: offer.file.type }), track });
+		const reply = await finishTransfer(id, 'completed');
+		if (!reply.ok && !get(incomingTransfers).find((t) => t.offer.id === id)?.completed) {
+			failIncoming(id, reply.error);
 		}
 	});
 
@@ -459,19 +517,21 @@ async function startReceiving(offer: TransferOffer) {
 /** The receiver's side of the transfer broke: show why, and report it with peer:finish. */
 function failIncoming(id: string, error: string) {
 	closePeer(id);
-	updateIncoming(id, (t) => (isOver(t) ? t : { ...t, status: 'failed', error }));
+	receivedFiles.delete(id);
+	updateIncoming(id, (t) => (isOver(t) || t.completed ? t : { ...t, status: 'failed', error }));
 	void finishTransfer(id, 'failed');
 }
 
 /** Take an answered or failed offer off the screen. */
 export function closeIncoming(id: string) {
 	closePeer(id);
+	receivedFiles.delete(id);
 	incomingTransfers.update((list) => list.filter((t) => t.offer.id !== id));
 }
 
-/** Whether every byte of an accepted offer has arrived. */
+/** Whether an accepted offer has fully arrived, checked out, and been confirmed by the server. */
 export function isReceived(transfer: IncomingTransfer): boolean {
-	return transfer.status === 'accepted' && transfer.received >= transfer.offer.file.size;
+	return transfer.status === 'accepted' && !!transfer.completed;
 }
 
 /**
@@ -481,6 +541,11 @@ export function isReceived(transfer: IncomingTransfer): boolean {
 export async function cancelIncoming(id: string) {
 	const transfer = get(incomingTransfers).find((t) => t.offer.id === id);
 	if (!transfer || transfer.cancelling || isOver(transfer)) return;
+	// The server is done with it once it has arrived; only this device still has the file.
+	if (transfer.completed) {
+		closeIncoming(id);
+		return;
+	}
 	updateIncoming(id, (t) => ({ ...t, cancelling: true }));
 
 	// The server's peer:ended (handled in endIncoming) usually closes it before this returns.
@@ -496,13 +561,30 @@ export async function cancelIncoming(id: string) {
 }
 
 /**
- * Keep a track once it has fully arrived.
- * Placeholder: with no file transfer yet there's nothing to save, so this only closes it.
+ * Keep a track once it has fully arrived: close the popup and add it to the library under the
+ * sender's track ID and metadata. The cover is read from the audio file itself.
  */
-export function confirmIncoming(id: string) {
+export async function confirmIncoming(id: string) {
 	const transfer = get(incomingTransfers).find((t) => t.offer.id === id);
 	if (!transfer || !isReceived(transfer)) return;
+	const received = receivedFiles.get(id);
 	closeIncoming(id);
+	if (!received) return;
+
+	const { audio, track } = received;
+	try {
+		// Loaded on demand: the library code pulls in the metadata parser.
+		const { importTransferredTrack } = await import('./library');
+		const result = await importTransferredTrack(
+			new File([audio], track.fileName, { type: audio.type }),
+			track
+		);
+		if (result === 'imported') toast.success(`Added "${track.title}" to your library.`);
+		else toast.info(`"${track.title}" is already in your library.`);
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : 'Something went wrong.';
+		toast.error(`Couldn't add "${track.title}": ${reason}`);
+	}
 }
 
 export function formatSize(bytes: number): string {
@@ -527,17 +609,25 @@ function request(send: (client: MapleSocket, ack: Ack) => void): Promise<Transfe
 }
 
 /**
- * Offer a file (`data`, described by `file`) to another of this account's devices, called
- * `label` in notices. `data` is kept with the offer and sent once it's accepted. On success
- * the offer is tracked in `outgoingOffers` and a "waiting" notice stays up until the other
- * device answers. On failure the caller decides how to show the error.
+ * Offer a track's file (`data`, described by `file`) to another of this account's devices,
+ * called `label` in notices. `data` and the track's metadata are kept with the offer and sent
+ * once it's accepted. On success the offer is tracked in `outgoingOffers` and a "waiting"
+ * notice stays up until the other device answers. On failure the caller decides how to show
+ * the error.
  */
 export async function sendOffer(
 	target: OwnDevice,
 	file: TransferFile,
 	data: Blob,
+	song: Song,
 	label = file.name
 ): Promise<TransferReply> {
+	// The library entry minus its artwork, as plain data: the start message is serialized, and a
+	// Svelte state proxy or the cover Blob can't go in it.
+	const track: TransferredTrackMetadata = JSON.parse(
+		JSON.stringify(song, (key, value) => (key === 'image' ? undefined : value))
+	);
+
 	const reply = await request((client, ack) =>
 		client.timeout(OFFER_TIMEOUT_MS).emit('peer:offer', { targetDeviceId: target.id, file }, ack)
 	);
@@ -546,7 +636,7 @@ export async function sendOffer(
 	const { transferId } = reply;
 	outgoingOffers.update((offers) => [
 		...offers,
-		{ transferId, target, file, data, label, status: 'pending', sent: 0 }
+		{ transferId, target, file, data, track, label, status: 'pending', sent: 0 }
 	]);
 	// Stays up until the other device answers. peer:decision then swaps it for the transfer
 	// popup, or endOutgoing replaces it (same id) if the offer is declined, expires or drops.
@@ -566,6 +656,11 @@ export async function sendOffer(
 export async function cancelOutgoing(transferId: string) {
 	const offer = get(outgoingOffers).find((o) => o.transferId === transferId);
 	if (!offer || offer.cancelling || isOver(offer)) return;
+	// Already delivered: the server has nothing left to cancel.
+	if (offer.completed) {
+		removeOutgoing(transferId);
+		return;
+	}
 	updateOutgoing(transferId, (o) => ({ ...o, cancelling: true }));
 
 	// The server's peer:ended (handled in endOutgoing) usually removes it before this returns.
@@ -581,9 +676,9 @@ export async function cancelOutgoing(transferId: string) {
 	}
 }
 
-/** Whether every byte of an accepted offer has gone out. */
+/** Whether the receiver reported an accepted offer complete (it checked the whole file). */
 export function isSent(offer: OutgoingOffer): boolean {
-	return offer.status === 'accepted' && offer.sent >= offer.file.size;
+	return offer.status === 'accepted' && !!offer.completed;
 }
 
 /**
