@@ -94,6 +94,11 @@ export type Song = {
 	ext: string;
 };
 
+export type AckMessage = {
+	type: 'ack';
+	nextOffset: number;
+};
+
 export type PeerMessage =
 	| {
 			type: 'start';
@@ -103,5 +108,5 @@ export type PeerMessage =
 			sendWindow: number;
 	}
 	| { type: 'chunk'; offset: number; bytes: ArrayBuffer }
-	| { type: 'ack'; nextOffset: number }
+	| AckMessage
 	| { type: 'end'; sha256: string };
