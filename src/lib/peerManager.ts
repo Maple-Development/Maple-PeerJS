@@ -86,6 +86,60 @@ function isAck(data: unknown): data is AckMessage {
 	return msg.type === 'ack' && typeof msg.nextOffset === 'number';
 }
 
+export async function sendChunks(
+    conn: DataConnection,
+    file: Blob,
+    onProgress?: (writtenBytes: number) => void
+): Promise<void> {
+    let sentOffset = 0;
+    let ackedOffset = 0;
+
+    function onAck(data: unknown) {
+        if (!isAck(data)) return;
+
+        const { nextOffset } = data;
+        if (!Number.isSafeInteger(nextOffset) || nextOffset <= ackedOffset || nextOffset > sentOffset) return;
+
+        ackedOffset = nextOffset;
+        onProgress?.(ackedOffset);
+    }
+
+    async function waitForProgress(condition: () => boolean) {
+        if (!conn.open) {
+            throw new Error('Connection is not open');
+        }
+        if (condition()) return;
+
+        await waitOnConnection(conn, 'data', 'Timed out waiting for progress', condition);
+    }
+
+    conn.on('data', onAck);
+
+    try {
+        while (sentOffset < file.size) {
+            const offset = sentOffset;
+            const end = Math.min(offset + CHUNK_SIZE, file.size);
+
+            await waitForProgress(() => end - ackedOffset <= SEND_WINDOW);
+
+            const bytes = await file.slice(offset, end).arrayBuffer();
+            if (!conn.open) throw new Error('Connection closed mid chunk');
+
+            sentOffset = end;
+            const message: PeerMessage = {
+                type: 'chunk',
+                offset,
+                bytes,
+            };
+            await conn.send(message);
+        }
+
+        await waitForProgress(() => ackedOffset === file.size);
+    } finally {
+        conn.off('data', onAck);
+    }
+}
+
 function waitOnConnection<T = void>(
     conn: DataConnection,
     event: 'open' | 'data',
