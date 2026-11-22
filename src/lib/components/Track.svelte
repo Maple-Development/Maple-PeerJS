@@ -5,6 +5,7 @@
 	import type { Song, Playlist, Album, Artist } from '$lib/types';
 	import { playlists } from '$lib/global.svelte';
 	import { OPFS } from '$lib/opfs';
+	import { openTrackFile } from '$lib/library';
 	import Lazy from 'svelte-lazy';
 	import { goto } from '$app/navigation';
 	import { refreshLibrary } from '$lib/global.svelte';
@@ -314,7 +315,7 @@
 
 	async function sendTrackToDevice(device: OwnDevice) {
 		if (!track) return;
-		const file = await OPFS.getSong(track).catch(() => undefined);
+		const file = await openTrackFile(track).catch(() => undefined);
 		if (!file) {
 			toast.error(`Couldn't read "${track.title}" from this device.`);
 			return;

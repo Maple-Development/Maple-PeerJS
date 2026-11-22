@@ -70,7 +70,7 @@ export interface OutgoingOffer {
 	status: 'pending' | 'accepted' | 'cancelled' | 'failed';
 	/** What notices call the file, e.g. the track's title. */
 	label: string;
-	/** The file itself (OPFS.getSong), sent once the other device's Peer is connected. */
+	/** The file itself, sent once the other device's Peer is connected. */
 	data: Blob;
 	/** The track's library entry (minus its artwork), sent in the start message. */
 	track: TransferredTrackMetadata;
@@ -628,10 +628,9 @@ export async function sendOffer(
 	song: Song,
 	label = file.name
 ): Promise<TransferReply> {
-	// The library entry minus its artwork, as plain data: the start message is serialized, and a
-	// Svelte state proxy or the cover Blob can't go in it.
+	// Send plain metadata without the cover Blob or this device's file location.
 	const track: TransferredTrackMetadata = JSON.parse(
-		JSON.stringify(song, (key, value) => (key === 'image' ? undefined : value))
+		JSON.stringify(song, (key, value) => (key === 'image' || key === 'source' ? undefined : value))
 	);
 
 	const reply = await request((client, ack) =>
