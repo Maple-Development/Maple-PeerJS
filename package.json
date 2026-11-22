@@ -44,6 +44,7 @@
 		"better-auth": "1.7.13",
 		"express": "^5.1.0",
 		"hash-wasm": "^4.13.0",
+		"idb": "^7.1.1",
 		"m3-svelte": "^4.6.2",
 		"music-metadata": "^11.16.1",
 		"opfs-tools": "^0.7.5",

@@ -78,6 +78,10 @@ export type Playlist = {
 
 export type LyricLine = { text: string; time?: number };
 
+export type SongSource =
+	| { kind: 'opfs' }
+	| { kind: 'linked-folder'; folderId: string; path: string[] };
+
 export type Song = {
 	lyrics?: LyricLine[];
 	id: string;
@@ -92,6 +96,7 @@ export type Song = {
 	trackNumber: number;
 	disk: number;
 	ext: string;
+	source?: SongSource;
 };
 
 export type AckMessage = {
@@ -99,7 +104,7 @@ export type AckMessage = {
 	nextOffset: number;
 };
 
-export type TransferredTrackMetadata = Omit<Song, 'image'>;
+export type TransferredTrackMetadata = Omit<Song, 'image' | 'source'>;
 
 export type StartMessage = {
 	type: 'start';
