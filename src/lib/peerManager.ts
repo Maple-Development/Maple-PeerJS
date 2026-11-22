@@ -37,7 +37,6 @@ export function createPeer(serverUrl: string) {
         secure: secure
     });
 
-    // log every error for the peer's whole lifetime, not just while it's opening
     peer.on('error', (error) => console.error('[PeerJS] peer error:', error));
 
     return peer;
