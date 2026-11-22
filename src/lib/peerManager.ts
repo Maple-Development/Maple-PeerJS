@@ -30,12 +30,16 @@ export function createPeer(serverUrl: string) {
     const url = new URL(serverUrl);
     const secure = url.protocol === 'https:';
 
-    return new Peer({
+    const peer = new Peer({
         host: url.hostname,
         port: url.port ? Number(url.port) : secure ? 443 : 80,
         path: url.pathname,
         secure: secure
-    })
+    });
+
+    peer.on('error', (error) => console.error('[PeerJS] peer error:', error));
+
+    return peer;
 }
 
 export async function connectToPeer(peer: Peer, peerId: string) : Promise<DataConnection> {
