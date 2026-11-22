@@ -11,7 +11,9 @@ import type {
 import type { DataConnection, Peer } from 'peerjs';
 import type { MapleSocket, Song, TransferredTrackMetadata } from './types';
 import { PEER_SERVER } from './api/server';
+import { createPeer } from './peerManager';
 import DeviceMessage from './components/DeviceMessage.svelte';
+import { browser } from '$app/env';
 
 const OFFER_TIMEOUT_MS = 10_000;
 // How long notices stay up once there's nothing left to cancel.
@@ -102,16 +104,20 @@ const receivedFiles = new Map<string, { audio: Blob; track: TransferredTrackMeta
 function openPeer(transferId: string): Promise<Peer> {
 	const opening = (async () => {
 		// peerjs needs browser APIs, so it only loads once a transfer starts.
-		const { createPeer } = await import('./peerManager');
-		const peer = createPeer(PEER_SERVER);
-		await new Promise<void>((resolve, reject) => {
-			peer.once('open', () => resolve());
-			peer.once('error', (error) => {
-				peer.destroy();
-				reject(error);
+		if(browser)
+		{
+			const peer = createPeer(PEER_SERVER);
+			await new Promise<void>((resolve, reject) => {
+				peer.once('open', () => resolve());
+				peer.once('error', (error) => {
+					peer.destroy();
+					reject(error);
+				});
 			});
-		});
-		return peer;
+
+			return peer;
+		}
+		throw new Error('Peers can only be opened in the browser.');
 	})();
 	peers.set(transferId, opening);
 	return opening;
