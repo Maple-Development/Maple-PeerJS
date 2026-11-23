@@ -53,6 +53,29 @@ async function assertPortFree(port: number, host: string) {
 	}
 }
 
+/**
+ * Pages that may call the preview API: Vite on localhost and 127.0.0.1, plus this machine's
+ * network addresses (LAN, Tailscale) when the preview listens on all of them. CORS_ORIGINS
+ * (comma-separated) adds more.
+ */
+function frontendOrigins(host: string) {
+	const hosts = new Set(['localhost', defaultHost]);
+	if (host === '0.0.0.0' || host === '::') {
+		for (const addresses of Object.values(os.networkInterfaces())) {
+			for (const address of addresses ?? []) {
+				if (!address.internal && address.family === 'IPv4') hosts.add(address.address);
+			}
+		}
+	} else if (host !== '::1') {
+		hosts.add(net.isIPv6(host) ? `[${host}]` : host);
+	}
+	const extra = (process.env.CORS_ORIGINS ?? '')
+		.split(',')
+		.map((origin) => origin.trim())
+		.filter(Boolean);
+	return [...[...hosts].map((name) => `http://${name}:5173`), ...extra];
+}
+
 function removeOwnedDirectory(directory: string) {
 	const stats = fs.lstatSync(directory, { throwIfNoEntry: false });
 	if (!stats) return;
@@ -104,7 +127,10 @@ async function main() {
 				SQLITE_PATH: databasePath,
 				PORT: String(port),
 				API_URL: process.env.API_URL || `http://${urlHost}:${port}`,
-				FRONTEND_URL: process.env.FRONTEND_URL || `http://${urlHost}:5173`
+				FRONTEND_URL: process.env.FRONTEND_URL || `http://${urlHost}:5173`,
+				CORS_ORIGINS: [
+					...new Set([process.env.FRONTEND_URL, ...frontendOrigins(host)].filter(Boolean))
+				].join(',')
 			},
 			true
 		);
@@ -157,6 +183,7 @@ async function main() {
 				console.log(`[PREVIEW] Listening on ${host}, ports ${port} and ${peerPort}`);
 				console.log(`[PREVIEW] Disposable API running at ${config.apiURL} for ${config.frontendURL}`);
 				console.log(`[PREVIEW] PeerJS running at http://${urlHost}:${peerPort}${peerPath}`);
+				console.log(`[PREVIEW] Accepting requests from ${config.corsOrigins.join(', ')}`);
 				console.log(`[PREVIEW] Temporary database: ${databasePath}`);
 				console.log(`[PREVIEW] Test account: ${guest.username} / ${guest.password}`);
 				console.log(`[PREVIEW] Legacy account: ${legacy.username} / ${legacy.password}`);

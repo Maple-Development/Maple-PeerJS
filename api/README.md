@@ -41,6 +41,14 @@ MySQL, or email service is needed. Ctrl+C stops it and deletes its database.
 Stop any other API on port 3000 first. Use `localhost` consistently, and remove any
 frontend `PUBLIC_API_URL` override pointing to a remote API.
 
+### Testing on a phone
+
+In dev the frontend calls the API and PeerServer on whatever host the page was opened
+on. Run `npm run preview -- --host` and `npm run dev -- --host`, then open
+`http://<computer's LAN or Tailscale address>:5173` on the phone. The preview accepts
+every IPv4 address of the computer and prints the list on startup. Music storage and
+passkeys need HTTPS or `localhost`, so they don't work from a plain `http://` address.
+
 For persistent local data, follow the installation steps below once, then run
 `npm run dev` from `api/` alongside the frontend. Keep the local URL defaults in
 `api/.env`. This mode needs real email delivery settings for verification and
