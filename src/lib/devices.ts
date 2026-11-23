@@ -11,7 +11,6 @@ import type {
 import type { DataConnection, Peer } from 'peerjs';
 import type { MapleSocket, Song, TransferredTrackMetadata } from './types';
 import { PEER_SERVER } from './api/server';
-import { createPeer } from './peerManager';
 import DeviceMessage from './components/DeviceMessage.svelte';
 import { browser } from '$app/env';
 
@@ -89,6 +88,12 @@ export interface OutgoingOffer {
  */
 export const outgoingOffers = writable<OutgoingOffer[]>([]);
 
+/**
+ * The track the user chose "Send to Device" for, while they pick which device gets it.
+ * TransferDialog.svelte shows the picker; it's cleared once the offer is sent or abandoned.
+ */
+export const trackToSend = writable<Song | null>(null);
+
 let socket: MapleSocket | null = null;
 
 /**
@@ -103,21 +108,19 @@ const receivedFiles = new Map<string, { audio: Blob; track: TransferredTrackMeta
 /** Create this tab's Peer for a transfer and wait until the PeerServer has given it an ID. */
 function openPeer(transferId: string): Promise<Peer> {
 	const opening = (async () => {
-		// peerjs needs browser APIs, so it only loads once a transfer starts.
-		if(browser)
-		{
-			const peer = createPeer(PEER_SERVER);
-			await new Promise<void>((resolve, reject) => {
-				peer.once('open', () => resolve());
-				peer.once('error', (error) => {
-					peer.destroy();
-					reject(error);
-				});
+		if (!browser) throw new Error('Peers can only be opened in the browser.');
+		// peerjs needs browser APIs, and its CommonJS build breaks server rendering, so it only
+		// loads once a transfer starts. Don't import peerManager statically from this module.
+		const { createPeer } = await import('./peerManager');
+		const peer = createPeer(PEER_SERVER);
+		await new Promise<void>((resolve, reject) => {
+			peer.once('open', () => resolve());
+			peer.once('error', (error) => {
+				peer.destroy();
+				reject(error);
 			});
-
-			return peer;
-		}
-		throw new Error('Peers can only be opened in the browser.');
+		});
+		return peer;
 	})();
 	peers.set(transferId, opening);
 	return opening;

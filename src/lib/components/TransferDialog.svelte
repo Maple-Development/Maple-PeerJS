@@ -1,6 +1,11 @@
 <script lang="ts">
+	import type { Snippet } from 'svelte';
 	import { Button, Dialog, LinearProgress } from 'm3-svelte';
+	import { goto } from '$app/navigation';
 	import type { TransferFile } from '$shared/types/peer';
+	import { OPFS } from '$lib/opfs';
+	import { openTrackFile } from '$lib/library';
+	import { isLoggedIn } from '$lib/store';
 	import DeviceMessage from './DeviceMessage.svelte';
 	import {
 		answerOffer,
@@ -9,13 +14,20 @@
 		closeIncoming,
 		closeOutgoing,
 		confirmIncoming,
+		devices,
 		formatSize,
 		incomingTransfers,
 		isOver,
 		isReceived,
 		isSent,
-		outgoingOffers
+		outgoingOffers,
+		renameSelf,
+		selfId,
+		sendOffer,
+		trackToSend
 	} from '$lib/devices';
+
+	const MAX_NAME = 40;
 
 	/** One transfer as the popup sees it, whichever way it's going. */
 	interface Shown {
@@ -24,6 +36,9 @@
 		direction: 'in' | 'out';
 		status: 'pending' | 'answering' | 'accepted' | 'cancelled' | 'failed';
 		file: TransferFile;
+		/** What to call the track: its title when this device sent it, else the file name. */
+		title: string;
+		artist?: string;
 		/** The other device's name. */
 		peer: string;
 		/** Bytes received (in) or sent (out) so far. */
@@ -45,6 +60,7 @@
 				direction: 'in',
 				status: incoming.status,
 				file: incoming.offer.file,
+				title: incoming.offer.file.name,
 				peer: incoming.offer.sender.name,
 				bytes: incoming.received,
 				done: isReceived(incoming),
@@ -60,6 +76,8 @@
 				direction: 'out',
 				status: outgoing.status,
 				file: outgoing.file,
+				title: outgoing.label,
+				artist: outgoing.track.artist || undefined,
 				peer: outgoing.target.name,
 				bytes: outgoing.sent,
 				done: isSent(outgoing),
@@ -70,29 +88,35 @@
 		return undefined;
 	});
 
+	// Picking a device for "Send to Device". A transfer that needs the popup goes first: an
+	// offer that arrives mid-pick is answered, then the picker comes back.
+	let picking = $derived(!current && !!$trackToSend);
+
 	// Writable so the dialog can close itself; it reopens whenever another transfer is queued.
-	let open = $derived(!!current);
+	let open = $derived(!!current || picking);
 
 	let over = $derived(!!current && isOver(current));
 	let answered = $derived(current?.status === 'accepted' || over);
 	let incoming = $derived(current?.direction === 'in');
 
 	let headline = $derived(
-		!current
-			? ''
-			: current.status === 'accepted'
-				? incoming
-					? current.done
-						? 'Track received'
-						: 'Receiving track'
-					: current.done
-						? 'Track sent'
-						: 'Sending track'
-				: current.status === 'cancelled'
-					? 'Transfer canceled'
-					: current.status === 'failed'
-						? 'Transfer ended'
-						: 'Incoming track'
+		picking
+			? 'Send track'
+			: !current
+				? ''
+				: current.status === 'accepted'
+					? incoming
+						? current.done
+							? 'Track received'
+							: 'Receiving track'
+						: current.done
+							? 'Track sent'
+							: 'Sending track'
+					: current.status === 'cancelled'
+						? 'Transfer canceled'
+						: current.status === 'failed'
+							? 'Transfer ended'
+							: 'Incoming track'
 	);
 
 	// The text around the other device's name, which is shown in bold between the two.
@@ -116,10 +140,125 @@
 		current && current.file.size > 0 ? (current.bytes / current.file.size) * 100 : 0
 	);
 
-	// Only a transfer that has already ended can be dismissed with Esc or a click outside. The
-	// others need a deliberate choice: closing an accepted one would cancel it.
+	/** This account's other online devices, which the picker offers to send to. */
+	let targets = $derived($devices.filter((d) => d.id !== $selfId));
+	let self = $derived($devices.find((d) => d.id === $selfId));
+	let pickedId = $state<string | null>(null);
+	// The first device is picked until the user picks another, or if theirs goes offline.
+	let target = $derived(targets.find((d) => d.id === pickedId) ?? targets[0]);
+
+	/** The track's file: undefined while it loads, null if it couldn't be read. */
+	let songFile = $state<Blob | null>();
+	let artwork = $state<string>();
+	let sending = $state(false);
+	let sendError = $state<string>();
+	let renaming = $state(false);
+	let draftName = $state('');
+
+	// Start each pick fresh, and load the track's file (its size is shown, and it's what gets
+	// sent) and its artwork.
+	$effect(() => {
+		const song = $trackToSend;
+		pickedId = null;
+		songFile = undefined;
+		artwork = undefined;
+		sendError = undefined;
+		renaming = false;
+		if (!song) return;
+
+		let stale = false;
+		openTrackFile(song).then(
+			(file) => {
+				if (!stale) songFile = file ?? null;
+			},
+			() => {
+				if (!stale) songFile = null;
+			}
+		);
+		let ownUrl: string | undefined;
+		if (song.image instanceof Blob) {
+			artwork = ownUrl = URL.createObjectURL(song.image);
+		} else if (song.image) {
+			OPFS.getImageUrl(song.image).then(
+				(url) => {
+					if (!stale) artwork = url;
+				},
+				() => {}
+			);
+		}
+		return () => {
+			stale = true;
+			if (ownUrl) URL.revokeObjectURL(ownUrl);
+		};
+	});
+
+	async function sendPicked() {
+		const song = $trackToSend;
+		const to = target;
+		const data = songFile;
+		if (!song || !to || !data || sending) return;
+		sending = true;
+		sendError = undefined;
+		// The file goes with the offer; devices.ts sends it once the other device accepts.
+		const reply = await sendOffer(
+			to,
+			{ name: song.fileName || `${song.title}.${song.ext}`, size: data.size, type: data.type },
+			data,
+			song,
+			song.title
+		);
+		sending = false;
+		// From here a "waiting" notice (from sendOffer) takes over until the other device answers.
+		if (reply.ok) {
+			if ($trackToSend === song) trackToSend.set(null);
+		} else {
+			sendError = reply.error;
+		}
+	}
+
+	function signIn() {
+		trackToSend.set(null);
+		goto('/login');
+	}
+
+	function startRename() {
+		if (!self) return;
+		draftName = self.name;
+		renaming = true;
+	}
+
+	function saveRename() {
+		if (!renaming) return;
+		renaming = false;
+		renameSelf(draftName);
+	}
+
+	function onRenameKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			saveRename();
+		} else if (e.key === 'Escape') {
+			e.preventDefault();
+			renaming = false;
+		}
+	}
+
+	function focusAndSelect(node: HTMLInputElement) {
+		node.focus();
+		node.select();
+	}
+
+	// The picker can always be dismissed (except while renaming, where Esc only cancels that).
+	// A transfer only once it has ended: the others need a deliberate choice, and closing an
+	// accepted one would cancel it.
+	let dismissable = $derived(current ? over : !renaming);
+
 	function close() {
-		if (!current || !over) return;
+		if (!current) {
+			trackToSend.set(null);
+			return;
+		}
+		if (!over) return;
 		if (incoming) closeIncoming(current.id);
 		else closeOutgoing(current.id);
 	}
@@ -138,15 +277,16 @@
 
 	// Esc does nothing until the transfer has ended. closeOnEsc alone isn't enough: the popup
 	// opens without a click from the user, and then the browser closes it on Esc anyway.
-	// Stopping the key itself means the dialog never starts to close.
+	// Stopping the key itself means the dialog never starts to close. The rename field still
+	// sees the key, and cancels the rename.
 	function blockEsc(e: KeyboardEvent) {
-		if (e.key === 'Escape' && current && !over) e.preventDefault();
+		if (e.key === 'Escape' && (current ? !over : renaming)) e.preventDefault();
 	}
 
 	// Closing an ended transfer can leave the next one hidden, and the browser may still close
 	// the popup some other way. Show it again while anything is waiting.
 	function reopen(e: Event) {
-		if (!current) return;
+		if (!current && !picking) return;
 		const dialog = e.currentTarget as HTMLDialogElement;
 		if (!open)
 			open = true; // the Dialog's own effect calls showModal
@@ -159,62 +299,142 @@
 <Dialog
 	bind:open
 	{headline}
-	closeOnEsc={over}
-	closeOnClick={over}
+	closeOnEsc={dismissable}
+	closeOnClick={dismissable}
 	onEsc={close}
 	onClick={close}
 	onclose={reopen}
+	style={picking ? 'width: min(31rem, calc(100vw - 2rem));' : undefined}
 >
 	{#if current}
+		{@const shown = current}
 		<div class="flex w-80 max-w-full flex-col gap-4">
-			{#if current.status === 'pending' || current.status === 'answering'}
-				<p><DeviceMessage device={current.peer} after=" wants to send you a track." /></p>
+			{#if shown.status === 'pending' || shown.status === 'answering'}
+				<p><DeviceMessage device={shown.peer} after=" wants to send you a track." /></p>
 			{/if}
 
-			<div class="bg-surface-container-highest flex items-center gap-3 rounded-2xl p-3">
-				<div
-					class="bg-primary-container text-on-primary-container flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full"
-				>
-					<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24">
-						<path
-							fill="currentColor"
-							d="M10 21q-1.65 0-2.825-1.175T6 17t1.175-2.825T10 13q.575 0 1.063.138t.937.412V3h6v4h-4v10q0 1.65-1.175 2.825T10 21"
-						/>
-					</svg>
-				</div>
-				<div class="flex min-w-0 flex-col">
-					<span class="text-on-surface truncate font-medium" title={current.file.name}>
-						{current.file.name}
-					</span>
-					<span class="text-on-surface-variant text-xs">
-						{formatSize(current.file.size)}{#if answered}<DeviceMessage
-								before=" {incoming ? 'from' : 'to'} "
-								device={current.peer}
-							/>{/if}
-					</span>
-				</div>
-			</div>
+			{#snippet transferDetails()}
+				{shown.artist ? `${shown.artist} · ` : ''}{formatSize(
+					shown.file.size
+				)}{#if answered}<DeviceMessage
+						before=" {incoming ? 'from' : 'to'} "
+						device={shown.peer}
+					/>{/if}
+			{/snippet}
+			{@render trackCard(shown.title, undefined, transferDetails)}
 
-			{#if current.status === 'accepted'}
+			{#if shown.status === 'accepted'}
 				<div class="flex flex-col gap-2">
 					<LinearProgress {percent} />
 					<div class="text-on-surface-variant flex justify-between gap-3 text-xs">
 						<span
 							><DeviceMessage
 								before={progressText[0]}
-								device={current.peer}
+								device={shown.peer}
 								after={progressText[1]}
 							/></span
 						>
 						<span class="flex-shrink-0"
-							>{formatSize(current.bytes)} of {formatSize(current.file.size)}</span
+							>{formatSize(shown.bytes)} of {formatSize(shown.file.size)}</span
 						>
 					</div>
 				</div>
-			{:else if current.status === 'cancelled'}
-				<p class="text-on-surface-variant">{current.error}</p>
-			{:else if current.status === 'failed'}
-				<p class="text-error">{current.error}</p>
+			{:else if shown.status === 'cancelled'}
+				<p class="text-on-surface-variant">{shown.error}</p>
+			{:else if shown.status === 'failed'}
+				<p class="text-error">{shown.error}</p>
+			{/if}
+		</div>
+	{:else if picking && $trackToSend}
+		{@const song = $trackToSend}
+		<div class="flex flex-col gap-4">
+			{#snippet songDetails()}
+				{song.artist || 'Unknown artist'}{songFile ? ` · ${formatSize(songFile.size)}` : ''}
+			{/snippet}
+			{@render trackCard(song.title || 'Untitled', artwork, songDetails)}
+
+			{#if !$isLoggedIn}
+				<p class="text-on-surface-variant text-sm">Sign in to send tracks to your other devices.</p>
+			{:else}
+				<div class="flex flex-col gap-2" role="group" aria-label="Your devices">
+					<div
+						class="text-on-surface-variant flex min-h-7 items-center justify-between gap-2 text-xs"
+					>
+						<span class="font-semibold">Your devices</span>
+						<!-- The server only lets a device rename itself. -->
+						{#if self && renaming}
+							<input
+								use:focusAndSelect
+								bind:value={draftName}
+								onkeydown={onRenameKeydown}
+								onblur={saveRename}
+								maxlength={MAX_NAME}
+								aria-label="This device's name"
+								class="text-on-surface border-outline focus:border-primary bg-surface-container-highest w-44 min-w-0 rounded-lg border px-2 py-1 text-xs outline-none"
+							/>
+						{:else if self}
+							<button
+								type="button"
+								onclick={startRename}
+								title="Rename this device"
+								class="hover:text-on-surface inline-flex min-w-0 cursor-pointer items-center gap-1 rounded-full px-1 py-0.5 transition-colors"
+							>
+								<span class="truncate"
+									><DeviceMessage before="Sending from " device={self.name} /></span
+								>
+								<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" aria-hidden="true">
+									<path
+										fill="currentColor"
+										d="M5 19h1.425L16.2 9.225L14.775 7.8L5 17.575zm-2 2v-4.25L16.2 3.575q.3-.275.663-.425t.762-.15t.775.15t.65.45L20.425 5q.3.275.438.65T21 6.4q0 .4-.137.763t-.438.662L7.25 21z"
+									/>
+								</svg>
+							</button>
+						{/if}
+					</div>
+
+					{#if targets.length}
+						<div class="flex flex-wrap gap-1.5">
+							{#each targets as device (device.id)}
+								{@const active = target?.id === device.id}
+								<button
+									type="button"
+									aria-pressed={active}
+									onclick={() => (pickedId = device.id)}
+									class={[
+										'inline-flex max-w-full cursor-pointer items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors',
+										active
+											? 'bg-secondary-container text-on-secondary-container border-primary/40'
+											: 'bg-surface-container text-on-surface-variant hover:text-on-surface border-transparent'
+									]}
+								>
+									<svg
+										class="shrink-0"
+										width="13"
+										height="13"
+										viewBox="0 0 24 24"
+										aria-hidden="true"
+									>
+										<path
+											fill="currentColor"
+											d="M7 23q-.825 0-1.412-.587T5 21V3q0-.825.588-1.412T7 1h10q.825 0 1.413.588T19 3v18q0 .825-.587 1.413T17 23zm0-5v3h10v-3zm0-2h10V6H7z"
+										/>
+									</svg>
+									<span class="truncate" title={device.name}>{device.name}</span>
+								</button>
+							{/each}
+						</div>
+					{:else}
+						<p class="text-on-surface-variant text-xs">
+							No other devices are online. Open Maple on another device signed in to this account.
+						</p>
+					{/if}
+				</div>
+			{/if}
+
+			{#if songFile === null}
+				<p class="text-error text-xs">Couldn't read "{song.title}" from this device.</p>
+			{:else if sendError}
+				<p class="text-error text-xs">{sendError}</p>
 			{/if}
 		</div>
 	{/if}
@@ -240,8 +460,41 @@
 				disabled={!current.done || current.cancelling}
 				onclick={() => finish(id)}>{incoming ? 'Confirm' : 'Done'}</Button
 			>
-		{:else}
+		{:else if current}
 			<Button variant="text" onclick={close}>Close</Button>
+		{:else if picking}
+			<Button variant="text" onclick={close}>Cancel</Button>
+			{#if $isLoggedIn}
+				<Button variant="filled" onclick={sendPicked} disabled={!target || !songFile || sending}>
+					{sending ? 'Sending…' : target ? `Send to ${target.name}` : 'Send'}
+				</Button>
+			{:else}
+				<Button variant="filled" onclick={signIn}>Sign in</Button>
+			{/if}
 		{/if}
 	{/snippet}
 </Dialog>
+
+{#snippet trackCard(title: string, artwork: string | undefined, details: Snippet)}
+	<div class="bg-surface-container-highest flex items-center gap-3 rounded-2xl p-3">
+		{#if artwork}
+			<img src={artwork} alt="" class="h-11 w-11 shrink-0 rounded-xl object-cover" />
+		{:else}
+			<div
+				class="bg-primary-container text-on-primary-container flex h-11 w-11 shrink-0 items-center justify-center rounded-xl"
+				aria-hidden="true"
+			>
+				<svg width="20" height="20" viewBox="0 0 24 24">
+					<path
+						fill="currentColor"
+						d="M12 5v8.55c-.94-.54-2.1-.75-3.33-.32c-1.34.48-2.37 1.67-2.61 3.07a4.007 4.007 0 0 0 4.59 4.65c1.96-.31 3.35-2.11 3.35-4.1V7h2c1.1 0 2-.9 2-2s-.9-2-2-2h-2c-1.1 0-2 .9-2 2"
+					/>
+				</svg>
+			</div>
+		{/if}
+		<div class="min-w-0 flex-1">
+			<p class="text-on-surface truncate text-sm font-semibold" {title}>{title}</p>
+			<p class="text-on-surface-variant truncate text-xs">{@render details()}</p>
+		</div>
+	</div>
+{/snippet}

@@ -5,7 +5,6 @@
 	import type { Song, Playlist, Album, Artist } from '$lib/types';
 	import { playlists } from '$lib/global.svelte';
 	import { OPFS } from '$lib/opfs';
-	import { openTrackFile } from '$lib/library';
 	import Lazy from 'svelte-lazy';
 	import { goto } from '$app/navigation';
 	import { refreshLibrary } from '$lib/global.svelte';
@@ -13,10 +12,7 @@
 	import { startPlayback } from '$lib/player';
 	import { recentlyPlayedManager, type QueueSource } from '$lib/store';
 	import { confirmDialog } from '$lib/confirm.svelte';
-	import DeviceList from '$lib/components/DeviceList.svelte';
-	import type { OwnDevice } from '$shared/types/peer';
-	import { sendOffer } from '$lib/devices';
-	import { toast } from 'svelte-sonner';
+	import { trackToSend } from '$lib/devices';
 
 	const DEFAULT_PLACEHOLDER =
 		'https://raw.githubusercontent.com/Cattn/Maple/8c1ab06960d3cec36714bf99cd6cee4ebb53913a/static/temp/MapleD.svg';
@@ -31,7 +27,6 @@
 	let content: HTMLDivElement | undefined = $state(undefined);
 	let card: HTMLDivElement | undefined = $state(undefined);
 	let hideSubmenuTimeout: number | null = null;
-	let showDeviceList: boolean = $state(false);
 
 	let {
 		track,
@@ -303,36 +298,14 @@
 	}
 
 	function handleSendTrackToDevice() {
-		showDeviceList = true;
 		showMenu = false;
 		showPlaylistSubmenu = false;
 		if (hideSubmenuTimeout) {
 			clearTimeout(hideSubmenuTimeout);
 			hideSubmenuTimeout = null;
 		}
-		if (!track) return;
-	}
-
-	async function sendTrackToDevice(device: OwnDevice) {
-		if (!track) return;
-		const file = await openTrackFile(track).catch(() => undefined);
-		if (!file) {
-			toast.error(`Couldn't read "${track.title}" from this device.`);
-			return;
-		}
-		// The file goes with the offer; devices.ts sends it once the other device accepts.
-		const reply = await sendOffer(
-			device,
-			{
-				name: track.fileName || `${track.title}.${track.ext}`,
-				size: file.size,
-				type: file.type
-			},
-			file,
-			track,
-			track.title
-		);
-		if (!reply.ok) toast.error(reply.error);
+		// TransferDialog (in the root layout) shows the device picker.
+		if (track) trackToSend.set(track);
 	}
 
 	function handlePlaylistHover() {
@@ -517,10 +490,6 @@
 		draggable="false"
 	/>
 {/snippet}
-
-{#if type === 'track'}
-	<DeviceList bind:visible={showDeviceList} onSelect={sendTrackToDevice} />
-{/if}
 
 <div
 	bind:this={card}
