@@ -25,6 +25,7 @@ const NO_PEER_SERVER = "Couldn't reach the transfer server.";
 const NO_CONNECTION = "Couldn't connect to the other device.";
 const NO_RESPONSE = 'The other device stopped responding.';
 const CORRUPTED = 'The file arrived damaged.';
+const CANCELLED_BY_YOU = 'You canceled this transfer.';
 
 const DEVICE_ID_KEY = 'maple-transfer-device-id';
 // A name the user picked for this browser. Without one, a name is made from the browser and OS.
@@ -101,6 +102,92 @@ let socket: MapleSocket | null = null;
  * offer is accepted, the receiver's once it accepts. Resolves when the Peer is open.
  */
 const peers = new Map<string, Promise<Peer>>();
+
+/**
+ * How a transfer ended. sent: the receiver checked the whole file. imported / discarded: the
+ * receiver kept it or threw it away. declined / expired: the offer was turned down or nobody
+ * answered. cancelled: either side stopped it. failed: it ended some other way.
+ */
+export type TransferOutcome =
+	| 'sent'
+	| 'imported'
+	| 'discarded'
+	| 'declined'
+	| 'expired'
+	| 'cancelled'
+	| 'failed';
+
+/** A transfer that has ended, as the Transfers tab lists it. */
+export interface FinishedTransfer {
+	id: string;
+	/** in: another device sent it to this one. out: this device sent it. */
+	direction: 'in' | 'out';
+	/** The track's title, or the file name if this device never got the track's metadata. */
+	title: string;
+	artist?: string;
+	size: number;
+	/** The other device's name. */
+	peer: string;
+	outcome: TransferOutcome;
+	/** Why it ended, when there's more to say than the outcome. */
+	detail?: string;
+	endedAt: number;
+}
+
+/**
+ * Transfers that ended while this tab was open, newest first. Kept in memory only, so a
+ * reload clears it. Each transfer is added once, when it ends, even if its popup is still open.
+ */
+export const transferHistory = writable<FinishedTransfer[]>([]);
+
+/**
+ * IDs already added, so a transfer that ends two ways at once (a cancel racing the server's
+ * peer:ended) shows once. Not emptied by clearTransferHistory.
+ */
+const recorded = new Set<string>();
+
+function record(entry: Omit<FinishedTransfer, 'endedAt'>) {
+	if (recorded.has(entry.id)) return;
+	recorded.add(entry.id);
+	transferHistory.update((list) => [{ ...entry, endedAt: Date.now() }, ...list]);
+}
+
+function recordOutgoing(offer: OutgoingOffer, outcome: TransferOutcome, detail?: string) {
+	record({
+		id: offer.transferId,
+		direction: 'out',
+		title: offer.label,
+		artist: offer.track.artist || undefined,
+		size: offer.file.size,
+		peer: offer.target.name,
+		outcome,
+		detail
+	});
+}
+
+/** `track` is the metadata the sender sent, once it has arrived. */
+function recordIncoming(
+	transfer: IncomingTransfer,
+	outcome: TransferOutcome,
+	detail?: string,
+	track?: TransferredTrackMetadata
+) {
+	record({
+		id: transfer.offer.id,
+		direction: 'in',
+		title: track?.title || transfer.offer.file.name,
+		artist: track?.artist || undefined,
+		size: transfer.offer.file.size,
+		peer: transfer.offer.sender.name,
+		outcome,
+		detail
+	});
+}
+
+/** Empty the Transfers tab's history. Transfers that haven't ended aren't affected. */
+export function clearTransferHistory() {
+	transferHistory.set([]);
+}
 
 /** Files that fully arrived and checked out, kept until the user confirms or closes them. */
 const receivedFiles = new Map<string, { audio: Blob; track: TransferredTrackMetadata }>();
@@ -310,9 +397,10 @@ function updateOutgoing(transferId: string, change: (offer: OutgoingOffer) => Ou
  */
 function failOutgoing(transferId: string, error: string) {
 	closePeer(transferId);
-	updateOutgoing(transferId, (o) =>
-		isOver(o) || o.completed ? o : { ...o, status: 'failed', error }
-	);
+	const offer = get(outgoingOffers).find((o) => o.transferId === transferId);
+	if (!offer || isOver(offer) || offer.completed) return;
+	updateOutgoing(transferId, (o) => ({ ...o, status: 'failed', error }));
+	recordOutgoing(offer, 'failed', error);
 }
 
 /** Say why an offer this device sent was ended by the other side (or the network). */
@@ -325,10 +413,12 @@ function endOutgoing(offer: OutgoingOffer, reason: TransferEnded['reason']) {
 	// takes it from here.
 	if (reason === 'completed') {
 		updateOutgoing(offer.transferId, (o) => ({ ...o, completed: true, sent: o.file.size }));
+		recordOutgoing(offer, 'sent');
 		return;
 	}
 	// This device asked for it: the server ending it is the confirmation.
 	if (offer.cancelling) {
+		recordOutgoing(offer, 'cancelled', CANCELLED_BY_YOU);
 		removeOutgoing(offer.transferId);
 		toast.dismiss(offer.transferId);
 		return;
@@ -341,11 +431,16 @@ function endOutgoing(offer: OutgoingOffer, reason: TransferEnded['reason']) {
 				? { ...o, status: 'cancelled', error: CANCELLED_BY_RECEIVER }
 				: { ...o, status: 'failed', error: ENDED_UNEXPECTEDLY }
 		);
+		if (reason === 'cancelled') recordOutgoing(offer, 'cancelled', CANCELLED_BY_RECEIVER);
+		else recordOutgoing(offer, 'failed', ENDED_UNEXPECTEDLY);
 		return;
 	}
 
 	// Still waiting for an answer: replace the "waiting" notice.
 	removeOutgoing(offer.transferId);
+	if (reason === 'expired') recordOutgoing(offer, 'expired');
+	else if (reason === 'cancelled') recordOutgoing(offer, 'declined');
+	else recordOutgoing(offer, 'failed', ENDED_UNEXPECTEDLY);
 	const what = `"${offer.file.name}"`;
 	// Same id as the "waiting" / "accepted" notice, so this replaces it. The replacement keeps
 	// any option it doesn't set, so the old Cancel button has to be cleared explicitly.
@@ -402,12 +497,14 @@ function endIncoming(id: string, reason: TransferEnded['reason']) {
 	}
 	// This device asked for it: the server ending it is the confirmation.
 	if (transfer?.cancelling) {
+		recordIncoming(transfer, 'cancelled', CANCELLED_BY_YOU);
 		closeIncoming(id);
 		return;
 	}
 	// Nobody answered in time. The sender is told and can offer it again, so there's nothing
 	// for this device to keep.
 	if (reason === 'expired' && transfer && !isOver(transfer)) {
+		recordIncoming(transfer, 'expired');
 		closeIncoming(id);
 		toast.info(DeviceMessage, {
 			componentProps: {
@@ -420,13 +517,14 @@ function endIncoming(id: string, reason: TransferEnded['reason']) {
 		});
 		return;
 	}
-	updateIncoming(id, (t) =>
-		isOver(t)
-			? t
-			: reason === 'cancelled'
-				? { ...t, status: 'cancelled', error: CANCELLED_BY_SENDER }
-				: { ...t, status: 'failed', error: ENDED_UNEXPECTEDLY }
-	);
+	if (!transfer || isOver(transfer)) return;
+	if (reason === 'cancelled') {
+		updateIncoming(id, (t) => ({ ...t, status: 'cancelled', error: CANCELLED_BY_SENDER }));
+		recordIncoming(transfer, 'cancelled', CANCELLED_BY_SENDER);
+	} else {
+		updateIncoming(id, (t) => ({ ...t, status: 'failed', error: ENDED_UNEXPECTEDLY }));
+		recordIncoming(transfer, 'failed', ENDED_UNEXPECTEDLY);
+	}
 }
 
 /** Accept or decline an incoming offer. Only the first answer counts. */
@@ -435,6 +533,7 @@ export async function answerOffer(id: string, accepted: boolean) {
 	if (transfer?.status !== 'pending') return;
 
 	if (!accepted) {
+		recordIncoming(transfer, 'declined');
 		closeIncoming(id);
 		await respondToOffer(id, false);
 		return;
@@ -448,6 +547,7 @@ export async function answerOffer(id: string, accepted: boolean) {
 
 	if (!reply.ok) {
 		updateIncoming(id, (t) => ({ ...t, status: 'failed', error: reply.error }));
+		recordIncoming(transfer, 'failed', reply.error);
 		return;
 	}
 	updateIncoming(id, (t) => ({ ...t, status: 'accepted' }));
@@ -488,9 +588,13 @@ async function startReceiving(offer: TransferOffer) {
 		try {
 			// Check the sender's start message against the offer, and validate the track metadata
 			// it carries.
-			const start = await receiveStart(conn, { transferId: id, size: offer.file.size }, async () => {
-				// Nothing to set up: the chunks are kept in memory until the end message.
-			});
+			const start = await receiveStart(
+				conn,
+				{ transferId: id, size: offer.file.size },
+				async () => {
+					// Nothing to set up: the chunks are kept in memory until the end message.
+				}
+			);
 			track = start.track;
 			// Ack the start (nextOffset 0), take the chunks in order, and wait for the end message.
 			// Resolves once the file's SHA-256 matches the sender's (otherwise 'Checksum mismatch').
@@ -527,7 +631,11 @@ async function startReceiving(offer: TransferOffer) {
 function failIncoming(id: string, error: string) {
 	closePeer(id);
 	receivedFiles.delete(id);
-	updateIncoming(id, (t) => (isOver(t) || t.completed ? t : { ...t, status: 'failed', error }));
+	const transfer = get(incomingTransfers).find((t) => t.offer.id === id);
+	if (transfer && !isOver(transfer) && !transfer.completed) {
+		updateIncoming(id, (t) => ({ ...t, status: 'failed', error }));
+		recordIncoming(transfer, 'failed', error);
+	}
 	void finishTransfer(id, 'failed');
 }
 
@@ -552,6 +660,7 @@ export async function cancelIncoming(id: string) {
 	if (!transfer || transfer.cancelling || isOver(transfer)) return;
 	// The server is done with it once it has arrived; only this device still has the file.
 	if (transfer.completed) {
+		recordIncoming(transfer, 'discarded');
 		closeIncoming(id);
 		return;
 	}
@@ -562,6 +671,7 @@ export async function cancelIncoming(id: string) {
 	const now = get(incomingTransfers).find((t) => t.offer.id === id);
 	if (!now?.cancelling) return;
 	if (reply.ok) {
+		recordIncoming(transfer, 'cancelled', CANCELLED_BY_YOU);
 		closeIncoming(id);
 	} else {
 		updateIncoming(id, (t) => ({ ...t, cancelling: false }));
@@ -578,7 +688,10 @@ export async function confirmIncoming(id: string) {
 	if (!transfer || !isReceived(transfer)) return;
 	const received = receivedFiles.get(id);
 	closeIncoming(id);
-	if (!received) return;
+	if (!received) {
+		recordIncoming(transfer, 'failed', 'The file is no longer available.');
+		return;
+	}
 
 	const { audio, track } = received;
 	try {
@@ -588,10 +701,16 @@ export async function confirmIncoming(id: string) {
 			new File([audio], track.fileName, { type: audio.type }),
 			track
 		);
-		if (result === 'imported') toast.success(`Added "${track.title}" to your library.`);
-		else toast.info(`"${track.title}" is already in your library.`);
+		if (result === 'imported') {
+			recordIncoming(transfer, 'imported', undefined, track);
+			toast.success(`Added "${track.title}" to your library.`);
+		} else {
+			recordIncoming(transfer, 'imported', 'Already in your library.', track);
+			toast.info(`"${track.title}" is already in your library.`);
+		}
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : 'Something went wrong.';
+		recordIncoming(transfer, 'failed', `Couldn't add it to your library: ${reason}`, track);
 		toast.error(`Couldn't add "${track.title}": ${reason}`);
 	}
 }
@@ -676,6 +795,7 @@ export async function cancelOutgoing(transferId: string) {
 	const now = get(outgoingOffers).find((o) => o.transferId === transferId);
 	if (!now?.cancelling) return;
 	if (reply.ok) {
+		recordOutgoing(offer, 'cancelled', CANCELLED_BY_YOU);
 		removeOutgoing(transferId);
 		toast.dismiss(transferId);
 	} else {

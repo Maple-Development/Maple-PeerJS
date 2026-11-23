@@ -1,11 +1,13 @@
 <script lang="ts">
-	import type { Snippet } from 'svelte';
+	import { untrack, type Snippet } from 'svelte';
 	import { Button, Dialog, LinearProgress } from 'm3-svelte';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
+	import { page } from '$app/state';
 	import type { TransferFile } from '$shared/types/peer';
 	import { OPFS } from '$lib/opfs';
 	import { openTrackFile } from '$lib/library';
-	import { isLoggedIn } from '$lib/store';
+	import { isLoggedIn, socialTab } from '$lib/store';
 	import DeviceMessage from './DeviceMessage.svelte';
 	import {
 		answerOffer,
@@ -24,10 +26,24 @@
 		renameSelf,
 		selfId,
 		sendOffer,
-		trackToSend
+		trackToSend,
+		transferHistory
 	} from '$lib/devices';
 
 	const MAX_NAME = 40;
+
+	// Once a transfer succeeds (sent, or added to this library), go to the Social page's
+	// Transfers tab, where finished transfers are listed. Declined, canceled and failed ones are
+	// listed too, but don't navigate away from what the user is doing.
+	let lastFinishedId: string | undefined;
+	$effect(() => {
+		const latest = $transferHistory[0];
+		if (!latest || latest.id === lastFinishedId) return;
+		lastFinishedId = latest.id;
+		if (latest.outcome !== 'sent' && latest.outcome !== 'imported') return;
+		socialTab.set('transfers');
+		if (untrack(() => page.url.pathname) !== resolve('/friends')) goto(resolve('/friends'));
+	});
 
 	/** One transfer as the popup sees it, whichever way it's going. */
 	interface Shown {
