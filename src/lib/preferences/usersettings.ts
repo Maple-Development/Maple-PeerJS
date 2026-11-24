@@ -1,5 +1,8 @@
 import { Settings } from './fetch';
 import { browser } from '$app/environment';
+
+/** Maple's own storage on this device, as opposed to a linked (external) folder. */
+export const INTERNAL_LOCATION = 'internal';
 let webhookEnabled = false;
 let webhookURL = '';
 
@@ -48,7 +51,9 @@ const UserSettings = {
 		showLogging,
 		socket,
 		jellyfinMode,
-		addExternalLyrics: preferences.get('addExternalLyrics') ?? false
+		addExternalLyrics: preferences.get('addExternalLyrics') ?? false,
+		/** Where received transfers are saved: INTERNAL_LOCATION, or a linked folder's ID. */
+		transferLocation: (preferences.get('transferLocation') as string | null) ?? INTERNAL_LOCATION
 	},
 	theme: {
 		sourceColor,

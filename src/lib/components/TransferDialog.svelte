@@ -6,9 +6,12 @@
 	import { page } from '$app/state';
 	import type { TransferFile } from '$shared/types/peer';
 	import { OPFS } from '$lib/opfs';
+	import { IFS } from '$lib/ifs';
+	import UserSettings, { INTERNAL_LOCATION } from '$lib/preferences/usersettings';
 	import { openTrackFile } from '$lib/library';
 	import { isLoggedIn, socialTab } from '$lib/store';
 	import DeviceMessage from './DeviceMessage.svelte';
+	import SelectMenu from './SelectMenu.svelte';
 	import {
 		answerOffer,
 		cancelIncoming,
@@ -159,6 +162,28 @@
 		current && current.file.size > 0 ? (current.bytes / current.file.size) * 100 : 0
 	);
 
+	// Where an incoming track is saved: Maple's own storage or one of the library's linked
+	// (external) folders. Starts at the default from Settings for each offer; the user can pick
+	// another.
+	const linkedFolders = IFS.linkedFolders;
+	let saveOptions = $derived([
+		{ id: INTERNAL_LOCATION, name: 'Internal storage' },
+		...[...$linkedFolders]
+			.sort((a, b) => a.handle.name.localeCompare(b.handle.name))
+			.map((f) => ({ id: f.id, name: f.handle.name }))
+	]);
+	let pickedLocation = $state<string>(INTERNAL_LOCATION);
+	let incomingId = $derived(incoming ? current?.id : undefined);
+	$effect(() => {
+		if (!incomingId) return;
+		pickedLocation = UserSettings.preferences.transferLocation;
+		IFS.loadFolders().catch(() => {});
+	});
+	// A folder that was unlinked since falls back to internal storage.
+	let saveLocation = $derived(
+		saveOptions.some((o) => o.id === pickedLocation) ? pickedLocation : INTERNAL_LOCATION
+	);
+
 	/** This account's other online devices, which the picker offers to send to. */
 	let targets = $derived($devices.filter((d) => d.id !== $selfId));
 	let self = $derived($devices.find((d) => d.id === $selfId));
@@ -290,7 +315,7 @@
 	// The right-hand button once everything has arrived: the receiver keeps the track, the
 	// sender is simply done.
 	function finish(id: string) {
-		if (incoming) void confirmIncoming(id);
+		if (incoming) void confirmIncoming(id, { location: saveLocation });
 		else closeOutgoing(id);
 	}
 
@@ -341,6 +366,20 @@
 					/>{/if}
 			{/snippet}
 			{@render trackCard(shown.title, undefined, transferDetails)}
+
+			{#if incoming && !over && saveOptions.length > 1}
+				<div class="text-on-surface-variant flex items-center justify-between gap-3 text-xs">
+					<label for="transfer-save-to" class="font-semibold">Save to</label>
+					<SelectMenu
+						id="transfer-save-to"
+						size="sm"
+						options={saveOptions}
+						bind:value={() => saveLocation, (v) => (pickedLocation = v)}
+						disabled={shown.cancelling}
+						class="max-w-52"
+					/>
+				</div>
+			{/if}
 
 			{#if shown.status === 'accepted'}
 				<div class="flex flex-col gap-2">
@@ -487,10 +526,12 @@
 				<Button variant="text" disabled={busy} onclick={() => cancel(id)}
 					>{busy ? 'Discarding…' : 'Discard'}</Button
 				>
-				<Button variant="tonal" disabled={busy} onclick={() => confirmIncoming(id, 'keep-both')}
+				<Button variant="tonal" disabled={busy} onclick={() =>
+						confirmIncoming(id, { location: saveLocation, onDuplicate: 'keep-both' })}
 					>Keep both</Button
 				>
-				<Button variant="filled" disabled={busy} onclick={() => confirmIncoming(id, 'replace')}
+				<Button variant="filled" disabled={busy} onclick={() =>
+						confirmIncoming(id, { location: saveLocation, onDuplicate: 'replace' })}
 					>Replace</Button
 				>
 			{:else}
