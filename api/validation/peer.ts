@@ -9,6 +9,7 @@ const transferBatchSchema = z
 		index: z.number().int().min(0),
 		count: z.number().int().min(2).max(MAX_BATCH_FILES),
 		size: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+		album: z.string().trim().min(1).max(255).optional(),
 		tracks: z
 			.array(
 				z.object({

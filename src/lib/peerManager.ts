@@ -1,5 +1,13 @@
 import { Peer, type DataConnection } from 'peerjs';
-import type { PeerMessage, AckMessage, StartMessage, TransferredTrackMetadata } from './types';
+import {
+	MAX_ARTWORK_BYTES,
+	type PeerMessage,
+	type AckMessage,
+	type StartMessage,
+	type TransferredAlbumMetadata,
+	type TransferredArtwork,
+	type TransferredTrackMetadata
+} from './types';
 import { createSHA256 } from 'hash-wasm';
 import * as z from 'zod';
 
@@ -25,6 +33,28 @@ const transferredTrackSchema = z.object({
 		time: z.number().nullish().transform((value) => value ?? undefined)
 	})).nullish().transform((value) => value ?? undefined)
 });
+
+const albumSchema = z.object({
+	name: z.string(),
+	artist: z.string(),
+	year: z.number(),
+	genre: z.string().nullish().transform((value) => value ?? undefined)
+});
+
+/** The cover in a start message, if it's a real image within the size limit. */
+function parseArtwork(value: unknown): TransferredArtwork | undefined {
+	if (typeof value !== 'object' || value === null) return undefined;
+	const { bytes, type } = value as Record<string, unknown>;
+	if (typeof type !== 'string' || !/^(image\/[a-z0-9.+-]{1,100})?$/i.test(type)) return undefined;
+	const buffer =
+		bytes instanceof ArrayBuffer
+			? bytes
+			: ArrayBuffer.isView(bytes)
+				? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength).slice().buffer
+				: undefined;
+	if (!buffer || buffer.byteLength === 0 || buffer.byteLength > MAX_ARTWORK_BYTES) return undefined;
+	return { bytes: buffer, type };
+}
 
 export function createPeer(serverUrl: string) {
     const url = new URL(serverUrl);
@@ -69,7 +99,8 @@ export async function sendStart(
     conn: DataConnection,
     transferId: string,
     size: number,
-    track: TransferredTrackMetadata
+    track: TransferredTrackMetadata,
+    album?: { metadata: TransferredAlbumMetadata; artwork?: TransferredArtwork }
 ): Promise<void> {
     if (!conn.open) {
         throw new Error('Connection is not open');
@@ -81,7 +112,9 @@ export async function sendStart(
         size,
         chunkSize: CHUNK_SIZE,
         sendWindow: SEND_WINDOW,
-        track
+        track,
+        ...(album ? { album: album.metadata } : {}),
+        ...(album?.artwork ? { artwork: album.artwork } : {})
     };
 
     const ackPromise = waitForAck(conn, 0)
@@ -218,6 +251,11 @@ export async function receiveStart(
         throw new Error('The track metadata is invalid');
     }
 
+    // The album and its cover are optional extras: if they don't check out, the track is still
+    // taken, filed under the album its own metadata names.
+    const parsedAlbum = start.album === undefined ? undefined : albumSchema.safeParse(start.album);
+    const artwork = parsedAlbum?.success ? parseArtwork(start.artwork) : undefined;
+
     await prepare();
 
     if (!conn.open) {
@@ -230,7 +268,9 @@ export async function receiveStart(
         size: expected.size,
         chunkSize: CHUNK_SIZE,
         sendWindow: SEND_WINDOW,
-        track: parsedTrack.data
+        track: parsedTrack.data,
+        ...(parsedAlbum?.success ? { album: parsedAlbum.data } : {}),
+        ...(artwork ? { artwork } : {})
     }
 }
 

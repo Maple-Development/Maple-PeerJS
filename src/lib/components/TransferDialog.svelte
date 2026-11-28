@@ -15,6 +15,7 @@
 	import BatchTracks, { type BatchTrackRow } from './BatchTracks.svelte';
 	import {
 		acceptBatch,
+		albumToSend,
 		answerOffer,
 		cancelIncoming,
 		cancelIncomingBatch,
@@ -154,8 +155,9 @@
 	// Picking a device to send tracks to. A transfer that needs the popup goes first: an
 	// offer that arrives mid-pick is answered, then the picker comes back.
 	let picking = $derived(!current && !batchIn && !showBatchOut && !!$tracksToSend);
-	/** The tracks being picked for. */
+	/** The tracks being picked for, and the album they are when it's an album being sent. */
 	let songs = $derived($tracksToSend?.songs ?? []);
+	let pickedAlbum = $derived($tracksToSend?.album);
 
 	// Writable so the dialog can close itself; it reopens whenever another transfer is queued.
 	let open = $derived(!!current || picking || !!batchIn || showBatchOut);
@@ -233,9 +235,11 @@
 			: showBatchOut && batchOut
 				? batchHeadline(batchOut.status, false)
 				: picking
-					? songs.length > 1
-						? 'Send tracks'
-						: 'Send track'
+					? pickedAlbum
+						? 'Send album'
+						: songs.length > 1
+							? 'Send tracks'
+							: 'Send track'
 					: !current
 						? ''
 						: current.status === 'accepted'
@@ -366,9 +370,10 @@
 	let draftName = $state('');
 
 	// Start each pick fresh, and load the tracks' files (their size is shown, and they're what
-	// gets sent) and, for one track, its artwork.
+	// gets sent) and, for one track or an album, its artwork.
 	$effect(() => {
 		const picked = $tracksToSend?.songs ?? [];
+		const pickedAlbumNow = $tracksToSend?.album;
 		pickedId = null;
 		songFiles = undefined;
 		artwork = undefined;
@@ -387,17 +392,17 @@
 		).then((files) => {
 			if (!stale) songFiles = files;
 		});
-		const song = picked[0];
-		if (picked.length > 1) {
+		const image = pickedAlbumNow ? pickedAlbumNow.image : picked[0].image;
+		if (picked.length > 1 && !pickedAlbumNow) {
 			return () => {
 				stale = true;
 			};
 		}
 		let ownUrl: string | undefined;
-		if (song.image instanceof Blob) {
-			artwork = ownUrl = URL.createObjectURL(song.image);
-		} else if (song.image) {
-			OPFS.getImageUrl(song.image).then(
+		if (image instanceof Blob) {
+			artwork = ownUrl = URL.createObjectURL(image);
+		} else if (image) {
+			OPFS.getImageUrl(image).then(
 				(url) => {
 					if (!stale) artwork = url;
 				},
@@ -425,11 +430,21 @@
 		if (!items.length) return;
 		sending = true;
 		sendError = undefined;
+		// An album's metadata and cover go with each of its tracks.
+		const album = picked.album ? await albumToSend(picked.album) : undefined;
 		// The files go with the offer; devices.ts sends them once the other device accepts.
 		const reply =
 			items.length === 1
-				? await sendOffer(to, items[0].file, items[0].data, items[0].song, items[0].label)
-				: await sendBatch(to, items, picked.songs.length - items.length);
+				? await sendOffer(
+						to,
+						items[0].file,
+						items[0].data,
+						items[0].song,
+						items[0].label,
+						undefined,
+						album
+					)
+				: await sendBatch(to, items, picked.songs.length - items.length, album);
 		sending = false;
 		// From here a "waiting" notice takes over until the other device answers.
 		if (reply.ok) {
@@ -555,18 +570,24 @@
 				<p>
 					<DeviceMessage
 						device={batch.sender.name}
-						after=" wants to send you {batch.count} tracks."
+						after={batch.album
+							? ` wants to send you the album “${batch.album}” (${batch.count} tracks).`
+							: ` wants to send you ${batch.count} tracks.`}
 					/>
 				</p>
 			{/if}
 
 			{#snippet batchInDetails()}
-				{formatSize(batch.size)}{#if !answering}<DeviceMessage
+				{#if batch.album}{batch.count} tracks · {/if}{formatSize(batch.size)}{#if !answering}<DeviceMessage
 						before=" from "
 						device={batch.sender.name}
 					/>{/if}
 			{/snippet}
-			<BatchTracks title="{batch.count} tracks" details={batchInDetails} tracks={batchInRows} />
+			<BatchTracks
+				title={batch.album ?? `${batch.count} tracks`}
+				details={batchInDetails}
+				tracks={batchInRows}
+			/>
 
 			{#if answering}
 				{#if saveOptions.length > 1}
@@ -629,10 +650,13 @@
 		{@const summary = outgoingSummary(batch)}
 		<div class="flex w-80 max-w-full flex-col gap-4">
 			{#snippet batchOutDetails()}
-				{formatSize(batchOutSize)}<DeviceMessage before=" to " device={batch.target.name} />
+				{#if batch.album}{batch.items.length} tracks · {/if}{formatSize(batchOutSize)}<DeviceMessage
+					before=" to "
+					device={batch.target.name}
+				/>
 			{/snippet}
 			<BatchTracks
-				title="{batch.items.length} tracks"
+				title={batch.album?.metadata.name ?? `${batch.items.length} tracks`}
 				details={batchOutDetails}
 				tracks={batchOutRows}
 			/>
@@ -733,7 +757,14 @@
 		{@const song = songs[0]}
 		{@const multi = songs.length > 1}
 		<div class="flex flex-col gap-4">
-			{#if multi}
+			{#if pickedAlbum}
+				{@const albumArtist = pickedAlbum.artist || 'Unknown artist'}
+				{#snippet albumDetails()}
+					{albumArtist} · {songs.length}
+					{songs.length === 1 ? 'track' : 'tracks'}{songFiles ? ` · ${formatSize(pickedSize)}` : ''}
+				{/snippet}
+				{@render trackCard(pickedAlbum.name || 'Untitled album', artwork, albumDetails)}
+			{:else if multi}
 				{@const artists = new Set(songs.map((s) => s.artist || 'Unknown artist'))}
 				{#snippet tracksDetails()}
 					{artists.size === 1 ? [...artists][0] : `${artists.size} artists`}{songFiles
