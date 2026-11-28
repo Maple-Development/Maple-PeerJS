@@ -1,11 +1,13 @@
 import { Peer, type DataConnection } from 'peerjs';
 import {
 	MAX_ARTWORK_BYTES,
+	MAX_PLAYLIST_DESCRIPTION,
 	type PeerMessage,
 	type AckMessage,
 	type StartMessage,
 	type TransferredAlbumMetadata,
 	type TransferredArtwork,
+	type TransferredPlaylistMetadata,
 	type TransferredTrackMetadata
 } from './types';
 import { createSHA256 } from 'hash-wasm';
@@ -39,6 +41,23 @@ const albumSchema = z.object({
 	artist: z.string(),
 	year: z.number(),
 	genre: z.string().nullish().transform((value) => value ?? undefined)
+});
+
+/** A playlist's created or modified date (ms since the epoch), if it's a real one. */
+const playlistDate = z
+	.number()
+	.int()
+	.positive()
+	.max(Number.MAX_SAFE_INTEGER)
+	.nullish()
+	.catch(undefined)
+	.transform((value) => value ?? undefined);
+
+const playlistSchema = z.object({
+	name: z.string().trim().min(1).max(255),
+	description: z.string().max(MAX_PLAYLIST_DESCRIPTION),
+	createdAt: playlistDate,
+	modifiedAt: playlistDate
 });
 
 /** The cover in a start message, if it's a real image within the size limit. */
@@ -100,7 +119,15 @@ export async function sendStart(
     transferId: string,
     size: number,
     track: TransferredTrackMetadata,
-    album?: { metadata: TransferredAlbumMetadata; artwork?: TransferredArtwork }
+    {
+        album,
+        playlist
+    }: {
+        /** The album the track is sent as part of, and its cover. */
+        album?: { metadata: TransferredAlbumMetadata; artwork?: TransferredArtwork };
+        /** The playlist the track is sent as part of, and its cover. */
+        playlist?: { metadata: TransferredPlaylistMetadata; artwork?: TransferredArtwork };
+    } = {}
 ): Promise<void> {
     if (!conn.open) {
         throw new Error('Connection is not open');
@@ -114,7 +141,9 @@ export async function sendStart(
         sendWindow: SEND_WINDOW,
         track,
         ...(album ? { album: album.metadata } : {}),
-        ...(album?.artwork ? { artwork: album.artwork } : {})
+        ...(album?.artwork ? { artwork: album.artwork } : {}),
+        ...(playlist ? { playlist: playlist.metadata } : {}),
+        ...(playlist?.artwork ? { playlistArtwork: playlist.artwork } : {})
     };
 
     const ackPromise = waitForAck(conn, 0)
@@ -255,6 +284,12 @@ export async function receiveStart(
     // taken, filed under the album its own metadata names.
     const parsedAlbum = start.album === undefined ? undefined : albumSchema.safeParse(start.album);
     const artwork = parsedAlbum?.success ? parseArtwork(start.artwork) : undefined;
+    // The same goes for the playlist: without it the track is still added, just not to a playlist.
+    const parsedPlaylist =
+        start.playlist === undefined ? undefined : playlistSchema.safeParse(start.playlist);
+    const playlistArtwork = parsedPlaylist?.success
+        ? parseArtwork(start.playlistArtwork)
+        : undefined;
 
     await prepare();
 
@@ -270,7 +305,9 @@ export async function receiveStart(
         sendWindow: SEND_WINDOW,
         track: parsedTrack.data,
         ...(parsedAlbum?.success ? { album: parsedAlbum.data } : {}),
-        ...(artwork ? { artwork } : {})
+        ...(artwork ? { artwork } : {}),
+        ...(parsedPlaylist?.success ? { playlist: parsedPlaylist.data } : {}),
+        ...(playlistArtwork ? { playlistArtwork } : {})
     }
 }
 

@@ -10,6 +10,7 @@ const transferBatchSchema = z
 		count: z.number().int().min(2).max(MAX_BATCH_FILES),
 		size: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 		album: z.string().trim().min(1).max(255).optional(),
+		playlist: z.string().trim().min(1).max(255).optional(),
 		tracks: z
 			.array(
 				z.object({
@@ -23,6 +24,9 @@ const transferBatchSchema = z
 	.refine((batch) => batch.index < batch.count, { message: 'Batch index out of range.' })
 	.refine((batch) => !batch.tracks || batch.tracks.length === batch.count, {
 		message: 'Batch track list does not match its count.'
+	})
+	.refine((batch) => !(batch.album && batch.playlist), {
+		message: 'A batch is an album or a playlist, not both.'
 	});
 
 // checks if the sent data meets our requirements

@@ -13,17 +13,22 @@ import type {
 import type { DataConnection, Peer } from 'peerjs';
 import {
 	MAX_ARTWORK_BYTES,
+	MAX_PLAYLIST_DESCRIPTION,
 	type Album,
 	type MapleSocket,
+	type Playlist,
 	type Song,
 	type TransferredAlbumMetadata,
 	type TransferredArtwork,
+	type TransferredPlaylistMetadata,
 	type TransferredTrackMetadata
 } from './types';
 import type { DuplicateChoice } from './library';
 import { PEER_SERVER } from './api/server';
 import DeviceMessage from './components/DeviceMessage.svelte';
 import { browser } from '$app/env';
+import { goto } from '$app/navigation';
+import { resolve } from '$app/paths';
 import { IFS } from './ifs';
 import { OPFS } from './opfs';
 import { INTERNAL_LOCATION } from './preferences/usersettings';
@@ -104,6 +109,8 @@ export interface OutgoingOffer {
 	track: TransferredTrackMetadata;
 	/** Set when the track is sent as part of an album: sent in the start message too. */
 	album?: AlbumToSend;
+	/** Set when the track is sent as part of a playlist: sent in the start message too. */
+	playlist?: PlaylistToSend;
 	/** Bytes the receiver has acknowledged so far (from sendChunks). */
 	sent: number;
 	/** The receiver checked the file and reported it complete (peer:ended with 'completed'). */
@@ -122,14 +129,18 @@ export interface OutgoingOffer {
 export const outgoingOffers = writable<OutgoingOffer[]>([]);
 
 /**
- * The tracks the user chose to send ("Send to Device" on a track or an album, or several picked
- * on the Transfers tab), while they pick which device gets them. `album` is set when they're an
- * album's tracks, in album order. TransferDialog.svelte shows the picker; it's cleared once
- * they're sent (then `onSent` runs) or the picker is closed.
+ * The tracks the user chose to send ("Send to Device" on a track, an album or a playlist, or
+ * several picked on the Transfers tab), while they pick which device gets them. `album` is set
+ * when they're an album's tracks, in album order; `playlist` when they're a playlist's, in its
+ * order. TransferDialog.svelte shows the picker; it's cleared once they're sent (then `onSent`
+ * runs) or the picker is closed.
  */
-export const tracksToSend = writable<{ songs: Song[]; album?: Album; onSent?: () => void } | null>(
-	null
-);
+export const tracksToSend = writable<{
+	songs: Song[];
+	album?: Album;
+	playlist?: Playlist;
+	onSent?: () => void;
+} | null>(null);
 
 /**
  * An album sent with its tracks: its metadata and cover go in each track's start message, so
@@ -151,21 +162,61 @@ export async function albumToSend(album: Album): Promise<AlbumToSend> {
 		year: album.year,
 		...(album.genre ? { genre: album.genre } : {})
 	};
-	let artwork: TransferredArtwork | undefined;
+	const artwork = await artworkToSend(album.image);
+	return artwork ? { metadata, artwork } : { metadata };
+}
+
+/**
+ * A playlist sent with its tracks: the receiver adds the tracks, then makes a playlist of them
+ * in the same order, with this name, description and cover.
+ */
+export interface PlaylistToSend {
+	metadata: TransferredPlaylistMetadata;
+	artwork?: TransferredArtwork;
+}
+
+/**
+ * What's sent of a playlist along with its tracks. Its cover is left out if it can't be read
+ * or is too big to send; the receiver's playlist then gets the placeholder.
+ */
+export async function playlistToSend(playlist: Playlist): Promise<PlaylistToSend> {
+	const metadata: TransferredPlaylistMetadata = {
+		name: playlistName(playlist),
+		description: (playlist.description ?? '').slice(0, MAX_PLAYLIST_DESCRIPTION),
+		...(playlist.createdAt ? { createdAt: playlist.createdAt } : {}),
+		...(playlist.modifiedAt ? { modifiedAt: playlist.modifiedAt } : {})
+	};
+	const artwork = await artworkToSend(playlist.image);
+	return artwork ? { metadata, artwork } : { metadata };
+}
+
+/** A playlist's name as it's sent: never empty, and within the server's limit. */
+function playlistName(playlist: Pick<Playlist, 'name'>): string {
+	return (playlist.name?.trim() || 'Untitled playlist').slice(0, 255);
+}
+
+/** A cover to send, or nothing if it can't be read or is too big. */
+async function artworkToSend(image: string | Blob | undefined): Promise<TransferredArtwork | undefined> {
 	try {
 		const cover =
-			album.image instanceof Blob
-				? album.image
-				: album.image
-					? await (await OPFS.get().image(album.image)).blob()
+			image instanceof Blob
+				? image
+				: image
+					? await (await OPFS.get().image(image)).blob()
 					: undefined;
 		if (cover && cover.size > 0 && cover.size <= MAX_ARTWORK_BYTES) {
-			artwork = { bytes: await cover.arrayBuffer(), type: await imageType(cover) };
+			return { bytes: await cover.arrayBuffer(), type: await imageType(cover) };
 		}
 	} catch {
 		// Sent without it.
 	}
-	return artwork ? { metadata, artwork } : { metadata };
+	return undefined;
+}
+
+/** An album or playlist sent along with its tracks (at most one of the two). */
+export interface TracksCollection {
+	album?: AlbumToSend;
+	playlist?: PlaylistToSend;
 }
 
 /** A cover's MIME type. Covers saved in OPFS don't keep theirs, so it's read from the bytes. */
@@ -224,6 +275,8 @@ export interface OutgoingBatch {
 	unreadable: number;
 	/** Set when the batch is an album's tracks. */
 	album?: AlbumToSend;
+	/** Set when the batch is a playlist's tracks. */
+	playlist?: PlaylistToSend;
 	/** This device asked to stop the batch and is waiting for the server to confirm. */
 	cancelling?: boolean;
 	error?: string;
@@ -241,6 +294,12 @@ export interface IncomingBatch {
 	size: number;
 	/** Set when the batch is an album's tracks: the album's name. */
 	album?: string;
+	/**
+	 * Set when the batch is a playlist's tracks: the playlist's name. Once the batch ends, the
+	 * tracks that made it are put in a new playlist, whose ID is then `playlistId`.
+	 */
+	playlist?: string;
+	playlistId?: string;
 	/**
 	 * Those files' tracks, in order, as the sender listed them. Missing if this tab first heard of
 	 * the batch partway through (only the first offer carries the list).
@@ -385,6 +444,8 @@ const receivedFiles = new Map<
 		track: TransferredTrackMetadata;
 		album?: TransferredAlbumMetadata;
 		artwork?: TransferredArtwork;
+		playlist?: TransferredPlaylistMetadata;
+		playlistArtwork?: TransferredArtwork;
 	}
 >();
 
@@ -544,7 +605,7 @@ export function watchDevices(client: MapleSocket) {
 		const opening = peers.get(transferId);
 		const offer = get(outgoingOffers).find((o) => o.transferId === transferId);
 		if (!opening || !offer) return;
-		const { data, track, album } = offer;
+		const { data, track, album, playlist } = offer;
 
 		const { connectToPeer, sendStart, sendChunks, sendEnd } = await import('./peerManager');
 		let conn: DataConnection;
@@ -562,7 +623,7 @@ export function watchDevices(client: MapleSocket) {
 		try {
 			// Tell the receiver what's coming (with the track's metadata) and wait for its ack
 			// (nextOffset 0).
-			await sendStart(conn, transferId, data.size, track, album);
+			await sendStart(conn, transferId, data.size, track, { album, playlist });
 			// Send the file; resolves with its SHA-256 once the receiver has acked every byte. The
 			// acks drive the popup's progress bar.
 			const checksum = await sendChunks(conn, data, (bytes) =>
@@ -836,6 +897,8 @@ async function startReceiving(offer: TransferOffer) {
 		let track: TransferredTrackMetadata;
 		let album: TransferredAlbumMetadata | undefined;
 		let artwork: TransferredArtwork | undefined;
+		let playlist: TransferredPlaylistMetadata | undefined;
+		let playlistArtwork: TransferredArtwork | undefined;
 		try {
 			// Check the sender's start message against the offer, and validate the track metadata
 			// it carries.
@@ -849,6 +912,17 @@ async function startReceiving(offer: TransferOffer) {
 			track = start.track;
 			album = start.album;
 			artwork = start.artwork;
+			playlist = start.playlist;
+			playlistArtwork = start.playlistArtwork;
+			// The sender's device says a batch is a playlist in each start message too, so the
+			// popup names it even if the server didn't pass the playlist's name on with the offer.
+			const playlistName = start.playlist?.name;
+			const batchId = offer.batch?.id;
+			if (playlistName && batchId) {
+				updateIncomingBatch(batchId, (b) =>
+					b.playlist || b.album ? b : { ...b, playlist: playlistName }
+				);
+			}
 			// Ack the start (nextOffset 0), take the chunks in order, and wait for the end message.
 			// Resolves once the file's SHA-256 matches the sender's (otherwise 'Checksum mismatch').
 			let received = 0;
@@ -889,7 +963,9 @@ async function startReceiving(offer: TransferOffer) {
 			audio: new Blob(chunks, { type: offer.file.type }),
 			track,
 			album,
-			artwork
+			artwork,
+			playlist,
+			playlistArtwork
 		});
 		const reply = await finishTransfer(id, 'completed');
 		if (!reply.ok && !get(incomingTransfers).find((t) => t.offer.id === id)?.completed) {
@@ -988,9 +1064,13 @@ export async function confirmIncoming(
 	await saveReceived(transfer, location, folderName, transfer.duplicate ? onDuplicate : undefined);
 }
 
+/** What happened to a file that arrived, and the ID its track has in the library if it's there. */
+type SavedOutcome = { outcome: 'imported' | 'skipped' | 'failed'; trackId?: string };
+
 /**
  * Add a file that arrived to the library, record how it went, and close it. Says so in a
- * notice unless `quiet` (a batch sums it up instead). Resolves with what happened to it.
+ * notice unless `quiet` (a batch sums it up instead). Resolves with what happened to it. A
+ * single track sent as a playlist (a playlist of one) is put in a new playlist too.
  */
 async function saveReceived(
 	transfer: IncomingTransfer,
@@ -998,14 +1078,29 @@ async function saveReceived(
 	folderName: string | undefined,
 	onDuplicate: DuplicateChoice | undefined,
 	quiet = false
-): Promise<'imported' | 'skipped' | 'failed'> {
+): Promise<SavedOutcome> {
 	const id = transfer.offer.id;
 	const received = receivedFiles.get(id);
 	closeIncoming(id);
 	if (!received) {
 		recordIncoming(transfer, 'failed', 'The file is no longer available.');
-		return 'failed';
+		return { outcome: 'failed' };
 	}
+	const saved = await addReceivedTrack(transfer, received, location, folderName, onDuplicate, quiet);
+	if (!transfer.batchId && received.playlist && saved.trackId) {
+		void addReceivedPlaylist(received.playlist, [saved.trackId], received.playlistArtwork);
+	}
+	return saved;
+}
+
+async function addReceivedTrack(
+	transfer: IncomingTransfer,
+	received: NonNullable<ReturnType<typeof receivedFiles.get>>,
+	location: string,
+	folderName: string | undefined,
+	onDuplicate: DuplicateChoice | undefined,
+	quiet: boolean
+): Promise<SavedOutcome> {
 
 	const notify = (show: () => void) => {
 		if (!quiet) show();
@@ -1014,7 +1109,7 @@ async function saveReceived(
 	try {
 		// Loaded on demand: the library code pulls in the metadata parser.
 		const { importTransferredTrack } = await import('./library');
-		const result = await importTransferredTrack(
+		const { result, id: trackId } = await importTransferredTrack(
 			new File([audio], track.fileName, { type: audio.type }),
 			track,
 			onDuplicate,
@@ -1045,15 +1140,53 @@ async function saveReceived(
 			// A batch set to skip duplicates leaves a track that's already here alone.
 			recordIncoming(transfer, quiet ? 'discarded' : 'imported', 'Already in your library.', track);
 			notify(() => toast.info(`"${track.title}" is already in your library.`));
-			return 'skipped';
+			return { outcome: 'skipped', trackId };
 		}
-		return 'imported';
+		return { outcome: 'imported', trackId };
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : 'Something went wrong.';
 		recordIncoming(transfer, 'failed', `Couldn't add it to your library: ${reason}`, track);
 		notify(() => toast.error(`Couldn't add "${track.title}": ${reason}`));
-		return 'failed';
+		return { outcome: 'failed' };
 	}
+}
+
+/**
+ * Make the playlist another device sent, from its tracks' IDs in this library, and say so in a
+ * notice unless `quiet` (a batch's popup says so instead; failing is always noticed). Resolves
+ * with its ID, or undefined if it couldn't be made.
+ */
+async function addReceivedPlaylist(
+	metadata: TransferredPlaylistMetadata,
+	trackIds: string[],
+	artwork?: TransferredArtwork,
+	quiet = false
+): Promise<string | undefined> {
+	try {
+		const { importTransferredPlaylist } = await import('./library');
+		const id = await importTransferredPlaylist(
+			metadata,
+			trackIds,
+			artwork ? new Blob([artwork.bytes], { type: artwork.type }) : undefined
+		);
+		if (!quiet) {
+			toast.success(`Added the playlist “${metadata.name}” to your library.`, {
+				action: { label: 'Open', onClick: () => void openPlaylist(id) }
+			});
+		}
+		return id;
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : 'Something went wrong.';
+		toast.error(`Couldn't make the playlist “${metadata.name}”: ${reason}`, {
+			description: 'Its tracks are still in your library.'
+		});
+		return undefined;
+	}
+}
+
+/** Go to a playlist's page. */
+export function openPlaylist(id: string) {
+	return goto(resolve('/playlists/playlist/[slug]', { slug: id }));
 }
 
 // Batches: several tracks sent to one device together. Each file is still its own transfer
@@ -1065,9 +1198,11 @@ export function isBatchOver(batch: { status: string }): boolean {
 	return batch.status === 'done' || batch.status === 'cancelled' || batch.status === 'failed';
 }
 
-/** What notices call a batch: the album “Name”, or e.g. 12 tracks. */
+/** What notices call a batch: the album “Name”, the playlist “Name”, or e.g. 12 tracks. */
 function describeBatch(batch: OutgoingBatch): string {
-	return batch.album ? `the album “${batch.album.metadata.name}”` : `${batch.items.length} tracks`;
+	if (batch.album) return `the album “${batch.album.metadata.name}”`;
+	if (batch.playlist) return `the playlist “${batch.playlist.metadata.name}”`;
+	return `${batch.items.length} tracks`;
 }
 
 function capitalize(text: string): string {
@@ -1097,13 +1232,14 @@ function endOutgoingBatch(status: 'done' | 'cancelled' | 'failed', error?: strin
 /**
  * Send several tracks to another device. The other device is asked once; once it accepts, the
  * files go one at a time and the transfer popup shows how far along they are. `unreadable` is
- * how many of the tracks the user picked couldn't be read, so they aren't in `items`.
+ * how many of the tracks the user picked couldn't be read, so they aren't in `items`. When the
+ * tracks are an album's or a playlist's, `collection` says which.
  */
 export async function sendBatch(
 	target: OwnDevice,
 	items: OutgoingBatchItem[],
 	unreadable = 0,
-	album?: AlbumToSend
+	{ album, playlist }: TracksCollection = {}
 ): Promise<TransferReply> {
 	if (items.length < 2 || items.length > MAX_BATCH_TRACKS) {
 		return { ok: false, error: `Pick between 2 and ${MAX_BATCH_TRACKS} tracks.` };
@@ -1123,7 +1259,8 @@ export async function sendBatch(
 		failed: 0,
 		results: [],
 		unreadable,
-		album
+		album,
+		playlist
 	};
 	outgoingBatch.set(batch);
 	// Up before the offer goes out, so an answer that comes back quickly can take it down.
@@ -1132,9 +1269,7 @@ export async function sendBatch(
 		componentProps: {
 			before: 'Waiting for ',
 			device: target.name,
-			after: album
-				? ` to accept the album “${album.metadata.name}”`
-				: ` to accept ${items.length} tracks`
+			after: ` to accept ${describeBatch(batch)}`
 		},
 		duration: Number.POSITIVE_INFINITY,
 		action: { label: 'Cancel', onClick: () => void cancelOutgoingBatch() }
@@ -1167,6 +1302,7 @@ async function offerBatchItem(batchId: string): Promise<TransferReply> {
 			count: batch.items.length,
 			size,
 			...(batch.album ? { album: batch.album.metadata.name } : {}),
+			...(batch.playlist ? { playlist: batch.playlist.metadata.name } : {}),
 			// The first offer lists every track, so the other device can show what it's accepting.
 			...(batch.index === 0
 				? {
@@ -1177,7 +1313,14 @@ async function offerBatchItem(batchId: string): Promise<TransferReply> {
 					}
 				: {})
 		},
-		batch.album
+		{
+			album: batch.album,
+			// The playlist's cover goes with each file until one has arrived: one copy is enough.
+			playlist:
+				batch.playlist && batch.sent > 0
+					? { metadata: batch.playlist.metadata }
+					: batch.playlist
+		}
 	);
 	if (!reply.ok) return reply;
 	const now = get(outgoingBatch);
@@ -1261,7 +1404,10 @@ function nextBatchItem(batch: OutgoingBatch, outcome: 'sent' | 'failed') {
 }
 
 async function retryBatch(batch: OutgoingBatch) {
-	const reply = await sendBatch(batch.target, batch.items, batch.unreadable, batch.album);
+	const reply = await sendBatch(batch.target, batch.items, batch.unreadable, {
+		album: batch.album,
+		playlist: batch.playlist
+	});
 	if (!reply.ok) toast.error(reply.error);
 }
 
@@ -1353,6 +1499,45 @@ function endIncomingBatch(id: string, status: 'done' | 'cancelled' | 'failed', e
 		transferId: undefined,
 		cancelling: false
 	}));
+	void finishIncomingPlaylist(id);
+}
+
+/**
+ * For each batch to this device: the tracks being added right now, and the ID in this library
+ * of each track that made it, by its place in the batch. When the batch is a playlist's tracks,
+ * also the playlist's metadata and cover (from the start messages, or else just the name the
+ * offer gave). Kept until the batch has ended and, for a playlist, the playlist is made.
+ */
+const incomingPlaylists = new Map<
+	string,
+	{
+		metadata?: TransferredPlaylistMetadata;
+		artwork?: TransferredArtwork;
+		saving: number;
+		trackIds: (string | undefined)[];
+	}
+>();
+
+/**
+ * Once a playlist's batch has ended (however it ended) and nothing is still being added, make
+ * the playlist from the tracks that made it, in order.
+ */
+async function finishIncomingPlaylist(batchId: string) {
+	const entry = incomingPlaylists.get(batchId);
+	if (!entry || entry.saving > 0) return;
+	const batch = findIncomingBatch(batchId);
+	if (batch && !isBatchOver(batch)) return;
+	incomingPlaylists.delete(batchId);
+	const trackIds = entry.trackIds.filter((id): id is string => !!id);
+	if (!entry.metadata || !trackIds.length) return;
+	// The batch's popup says so while it's up; once it's been closed a notice does.
+	const playlistId = await addReceivedPlaylist(
+		entry.metadata,
+		trackIds,
+		entry.artwork,
+		!!findIncomingBatch(batchId)
+	);
+	if (playlistId) updateIncomingBatch(batchId, (b) => ({ ...b, playlistId }));
 }
 
 /**
@@ -1371,6 +1556,7 @@ function receiveBatchOffer(offer: TransferOffer, info: TransferBatch) {
 				count: info.count - info.index,
 				size: info.size,
 				album: info.album,
+				playlist: info.playlist,
 				tracks: info.tracks?.slice(info.index),
 				start: info.index,
 				position: 0,
@@ -1522,8 +1708,33 @@ async function addBatchItem(batchId: string, transfer: IncomingTransfer, positio
 		return;
 	}
 	const onDuplicate = batch.onDuplicate === 'skip' ? undefined : batch.onDuplicate;
-	const result = await saveReceived(transfer, batch.location, batch.folderName, onDuplicate, true);
-	countBatchResult(batchId, result, position);
+
+	// Note where each track ends up, so if the batch is a playlist's tracks, the playlist made
+	// once it ends has them all, in order. Whether it is comes from the sender's device (in
+	// each file's start message) or, failing that, the offer.
+	const received = receivedFiles.get(transfer.offer.id);
+	let entry = incomingPlaylists.get(batchId);
+	if (!entry) {
+		entry = { saving: 0, trackIds: [] };
+		incomingPlaylists.set(batchId, entry);
+	}
+	if (received?.playlist) entry.metadata = received.playlist;
+	else if (!entry.metadata && batch.playlist) {
+		entry.metadata = { name: batch.playlist, description: '' };
+	}
+	entry.artwork ??= received?.playlistArtwork;
+	entry.saving++;
+	const { outcome, trackId } = await saveReceived(
+		transfer,
+		batch.location,
+		batch.folderName,
+		onDuplicate,
+		true
+	);
+	entry.saving--;
+	entry.trackIds[position] = trackId;
+	countBatchResult(batchId, outcome, position);
+	void finishIncomingPlaylist(batchId);
 }
 
 function countBatchResult(
@@ -1613,7 +1824,7 @@ export async function sendOffer(
 	song: Song,
 	label = file.name,
 	batch?: TransferBatch,
-	album?: AlbumToSend
+	{ album, playlist }: TracksCollection = {}
 ): Promise<TransferReply> {
 	// Send plain metadata without the cover Blob or this device's file location.
 	const track: TransferredTrackMetadata = JSON.parse(
@@ -1637,6 +1848,7 @@ export async function sendOffer(
 			data,
 			track,
 			album,
+			playlist,
 			label,
 			status: 'pending',
 			sent: 0,
