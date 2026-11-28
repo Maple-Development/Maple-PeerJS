@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type {
 	OwnDevice,
 	TransferBatch,
+	TransferBatchTrack,
 	TransferEnded,
 	TransferFile,
 	TransferOffer,
@@ -153,6 +154,8 @@ export interface OutgoingBatch {
 	sent: number;
 	/** Items whose transfer failed (the batch went on without them). */
 	failed: number;
+	/** How each item whose turn is over went, by its index. */
+	results: ('sent' | 'failed')[];
 	/** Tracks the user picked that this device couldn't read, so they were left out. */
 	unreadable: number;
 	/** This device asked to stop the batch and is waiting for the server to confirm. */
@@ -170,6 +173,15 @@ export interface IncomingBatch {
 	/** Files still to come when the batch was offered to this device, and their bytes. */
 	count: number;
 	size: number;
+	/**
+	 * Those files' tracks, in order, as the sender listed them. Missing if this tab first heard of
+	 * the batch partway through (only the first offer carries the list).
+	 */
+	tracks?: TransferBatchTrack[];
+	/** The batch index of this device's first file, which `tracks` and `results` count from. */
+	start: number;
+	/** Where the file on offer or arriving now is in `tracks`. */
+	position: number;
 	/**
 	 * pending: waiting for the user. answering: their acceptance is on its way. receiving: the
 	 * files are arriving, and each is added to the library as it does. done: every file had its
@@ -189,6 +201,8 @@ export interface IncomingBatch {
 	imported: number;
 	skipped: number;
 	failed: number;
+	/** How each file went once it's settled and added, by its place in `tracks`. */
+	results: ('imported' | 'skipped' | 'failed')[];
 	/** This device asked to stop the batch and is waiting for the server to confirm. */
 	cancelling?: boolean;
 	error?: string;
@@ -1010,6 +1024,7 @@ export async function sendBatch(
 		doneBytes: 0,
 		sent: 0,
 		failed: 0,
+		results: [],
 		unreadable
 	};
 	outgoingBatch.set(batch);
@@ -1044,7 +1059,16 @@ async function offerBatchItem(batchId: string): Promise<TransferReply> {
 		id: batch.id,
 		index: batch.index,
 		count: batch.items.length,
-		size
+		size,
+		// The first offer lists every track, so the other device can show what it's accepting.
+		...(batch.index === 0
+			? {
+					tracks: batch.items.map(({ song }) => ({
+						title: (song.title || song.fileName || '').slice(0, 200),
+						artist: (song.artist || '').slice(0, 200)
+					}))
+				}
+			: {})
 	});
 	if (!reply.ok) return reply;
 	const now = get(outgoingBatch);
@@ -1109,7 +1133,8 @@ function nextBatchItem(batch: OutgoingBatch, outcome: 'sent' | 'failed') {
 		transferId: undefined,
 		doneBytes: batch.doneBytes + batch.items[batch.index].file.size,
 		sent: batch.sent + (outcome === 'sent' ? 1 : 0),
-		failed: batch.failed + (outcome === 'failed' ? 1 : 0)
+		failed: batch.failed + (outcome === 'failed' ? 1 : 0),
+		results: Object.assign([...batch.results], { [batch.index]: outcome })
 	};
 	if (batch.cancelling) {
 		outgoingBatch.set(finished);
@@ -1236,6 +1261,9 @@ function receiveBatchOffer(offer: TransferOffer, info: TransferBatch) {
 				sender: offer.sender,
 				count: info.count - info.index,
 				size: info.size,
+				tracks: info.tracks?.slice(info.index),
+				start: info.index,
+				position: 0,
 				status: 'pending',
 				transferId: offer.id,
 				location: INTERNAL_LOCATION,
@@ -1244,7 +1272,8 @@ function receiveBatchOffer(offer: TransferOffer, info: TransferBatch) {
 				doneBytes: 0,
 				imported: 0,
 				skipped: 0,
-				failed: 0
+				failed: 0,
+				results: []
 			}
 		]);
 		incomingTransfers.update((list) => [...list, transfer]);
@@ -1262,7 +1291,11 @@ function receiveBatchOffer(offer: TransferOffer, info: TransferBatch) {
 		return;
 	}
 	clearNextFileTimer(batch.id);
-	updateIncomingBatch(batch.id, (b) => ({ ...b, transferId: offer.id }));
+	updateIncomingBatch(batch.id, (b) => ({
+		...b,
+		transferId: offer.id,
+		position: info.index - b.start
+	}));
 	incomingTransfers.update((list) => [...list, transfer]);
 	void answerOffer(offer.id, true);
 }
@@ -1349,8 +1382,9 @@ function incomingItemEnded(batchId: string, id: string, reason: TransferEnded['r
 		doneBytes: b.doneBytes + (transfer?.offer.file.size ?? 0)
 	}));
 
+	const position = batch.position;
 	if (transfer && isReceived(transfer)) {
-		void addBatchItem(batchId, transfer);
+		void addBatchItem(batchId, transfer, position);
 	} else {
 		closeIncoming(id);
 		if (reason === 'cancelled') {
@@ -1366,12 +1400,12 @@ function incomingItemEnded(batchId: string, id: string, reason: TransferEnded['r
 			return;
 		}
 		// This file didn't make it; the sender goes on with the next.
-		countBatchResult(batchId, 'failed');
+		countBatchResult(batchId, 'failed', position);
 	}
 	waitForNextFile(batchId);
 }
 
-async function addBatchItem(batchId: string, transfer: IncomingTransfer) {
+async function addBatchItem(batchId: string, transfer: IncomingTransfer, position: number) {
 	const batch = findIncomingBatch(batchId);
 	if (!batch) {
 		closeIncoming(transfer.offer.id);
@@ -1379,11 +1413,19 @@ async function addBatchItem(batchId: string, transfer: IncomingTransfer) {
 	}
 	const onDuplicate = batch.onDuplicate === 'skip' ? undefined : batch.onDuplicate;
 	const result = await saveReceived(transfer, batch.location, batch.folderName, onDuplicate, true);
-	countBatchResult(batchId, result);
+	countBatchResult(batchId, result, position);
 }
 
-function countBatchResult(batchId: string, result: 'imported' | 'skipped' | 'failed') {
-	updateIncomingBatch(batchId, (b) => ({ ...b, [result]: b[result] + 1 }));
+function countBatchResult(
+	batchId: string,
+	result: 'imported' | 'skipped' | 'failed',
+	position: number
+) {
+	updateIncomingBatch(batchId, (b) => ({
+		...b,
+		[result]: b[result] + 1,
+		results: Object.assign([...b.results], { [position]: result })
+	}));
 	const batch = findIncomingBatch(batchId);
 	if (
 		batch?.status === 'receiving' &&

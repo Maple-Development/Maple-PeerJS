@@ -21,6 +21,16 @@ export interface TransferBatch {
     count: number
     /** Bytes of this file and every file after it in the batch. */
     size: number
+    /**
+     * Sent with the first file only: every track in the batch, in order, so the receiver can
+     * see what it's accepting.
+     */
+    tracks?: TransferBatchTrack[]
+}
+
+export interface TransferBatchTrack {
+    title: string
+    artist: string
 }
 
 export interface TransferRequest {

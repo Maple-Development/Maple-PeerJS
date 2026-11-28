@@ -8,9 +8,21 @@ const transferBatchSchema = z
 		id: z.uuid(),
 		index: z.number().int().min(0),
 		count: z.number().int().min(2).max(MAX_BATCH_FILES),
-		size: z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
+		size: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+		tracks: z
+			.array(
+				z.object({
+					title: z.string().max(200),
+					artist: z.string().max(200)
+				})
+			)
+			.max(MAX_BATCH_FILES)
+			.optional()
 	})
-	.refine((batch) => batch.index < batch.count, { message: 'Batch index out of range.' });
+	.refine((batch) => batch.index < batch.count, { message: 'Batch index out of range.' })
+	.refine((batch) => !batch.tracks || batch.tracks.length === batch.count, {
+		message: 'Batch track list does not match its count.'
+	});
 
 // checks if the sent data meets our requirements
 export const transferRequestSchema = z

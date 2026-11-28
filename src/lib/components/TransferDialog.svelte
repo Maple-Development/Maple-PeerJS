@@ -12,6 +12,7 @@
 	import { isLoggedIn, socialTab } from '$lib/store';
 	import DeviceMessage from './DeviceMessage.svelte';
 	import SelectMenu from './SelectMenu.svelte';
+	import BatchTracks, { type BatchTrackRow } from './BatchTracks.svelte';
 	import {
 		acceptBatch,
 		answerOffer,
@@ -319,6 +320,45 @@
 	let readableCount = $derived(songFiles?.filter(Boolean).length ?? 0);
 	let unreadableCount = $derived(songFiles ? songFiles.length - readableCount : 0);
 	let pickedSize = $derived(songFiles?.reduce((sum, f) => sum + (f?.size ?? 0), 0) ?? 0);
+
+	// Each batch's tracks for its card's list, and how far along each one is.
+	let pickedRows: BatchTrackRow[] = $derived(
+		songs.map((s, i) => ({
+			title: s.title,
+			artist: s.artist,
+			status: songFiles?.[i] === null ? 'unreadable' : undefined
+		}))
+	);
+	let batchInRows: BatchTrackRow[] | undefined = $derived(
+		batchIn?.tracks?.map((track, i) => {
+			const result = batchIn.results[i];
+			const status =
+				result === 'imported'
+					? 'done'
+					: result
+						? result
+						: batchIn.status === 'pending' || batchIn.status === 'answering'
+							? undefined
+							: i < batchIn.settled || (i === batchIn.position && batchIn.transferId)
+								? 'active'
+								: 'waiting';
+			return { ...track, status };
+		})
+	);
+	let batchOutRows: BatchTrackRow[] | undefined = $derived(
+		batchOut?.items.map(({ song }, i) => {
+			const result = batchOut.results[i];
+			const status =
+				result === 'sent'
+					? 'done'
+					: result
+						? result
+						: i === batchOut.index && batchOut.status === 'sending'
+							? 'active'
+							: 'waiting';
+			return { title: song.title, artist: song.artist, status };
+		})
+	);
 	let artwork = $state<string>();
 	let sending = $state(false);
 	let sendError = $state<string>();
@@ -526,7 +566,7 @@
 						device={batch.sender.name}
 					/>{/if}
 			{/snippet}
-			{@render trackCard(`${batch.count} tracks`, undefined, batchInDetails, true)}
+			<BatchTracks title="{batch.count} tracks" details={batchInDetails} tracks={batchInRows} />
 
 			{#if answering}
 				{#if saveOptions.length > 1}
@@ -591,7 +631,11 @@
 			{#snippet batchOutDetails()}
 				{formatSize(batchOutSize)}<DeviceMessage before=" to " device={batch.target.name} />
 			{/snippet}
-			{@render trackCard(`${batch.items.length} tracks`, undefined, batchOutDetails, true)}
+			<BatchTracks
+				title="{batch.items.length} tracks"
+				details={batchOutDetails}
+				tracks={batchOutRows}
+			/>
 
 			{#if batch.status === 'sending'}
 				{@const item = batch.items[batch.index]}
@@ -636,7 +680,7 @@
 						device={shown.peer}
 					/>{/if}
 			{/snippet}
-			{@render trackCard(shown.title, undefined, transferDetails, false)}
+			{@render trackCard(shown.title, undefined, transferDetails)}
 
 			{#if incoming && !over && saveOptions.length > 1}
 				<div class="text-on-surface-variant flex items-center justify-between gap-3 text-xs">
@@ -696,12 +740,12 @@
 						? ` · ${formatSize(pickedSize)}`
 						: ''}
 				{/snippet}
-				{@render trackCard(`${songs.length} tracks`, undefined, tracksDetails, true)}
+				<BatchTracks title="{songs.length} tracks" details={tracksDetails} tracks={pickedRows} />
 			{:else}
 				{#snippet songDetails()}
 					{song.artist || 'Unknown artist'}{songFile ? ` · ${formatSize(songFile.size)}` : ''}
 				{/snippet}
-				{@render trackCard(song.title || 'Untitled', artwork, songDetails, false)}
+				{@render trackCard(song.title || 'Untitled', artwork, songDetails)}
 			{/if}
 
 			{#if !$isLoggedIn}
@@ -887,21 +931,9 @@
 	{/snippet}
 </Dialog>
 
-{#snippet trackCard(title: string, artwork: string | undefined, details: Snippet, several: boolean)}
+{#snippet trackCard(title: string, artwork: string | undefined, details: Snippet)}
 	<div class="bg-surface-container-highest flex items-center gap-3 rounded-2xl p-3">
-		{#if several}
-			<div
-				class="bg-primary-container text-on-primary-container flex h-11 w-11 shrink-0 items-center justify-center rounded-xl"
-				aria-hidden="true"
-			>
-				<svg width="20" height="20" viewBox="0 0 24 24">
-					<path
-						fill="currentColor"
-						d="M12.5 15q1.05 0 1.775-.725T15 12.5V7h3V5h-4v5.5q-.325-.25-.7-.375T12.5 10q-1.05 0-1.775.725T10 12.5t.725 1.775T12.5 15M8 18q-.825 0-1.412-.587T6 16V4q0-.825.588-1.412T8 2h12q.825 0 1.413.588T22 4v12q0 .825-.587 1.413T20 18zm-4 4q-.825 0-1.412-.587T2 20V6h2v14h14v2z"
-					/>
-				</svg>
-			</div>
-		{:else if artwork}
+		{#if artwork}
 			<img src={artwork} alt="" class="h-11 w-11 shrink-0 rounded-xl object-cover" />
 		{:else}
 			<div
