@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { Button } from 'm3-svelte';
+	import SelectTracks from './SelectTracks.svelte';
 	import {
 		clearTransferHistory,
 		transferHistory,
@@ -9,8 +11,11 @@
 	/**
 	 * The Transfers tab on the Social page: transfers that ended this session. Anything still
 	 * going (offers, sending, receiving, waiting to be imported) is handled in the transfer popup
-	 * (TransferDialog.svelte) and only shows up here once it's over.
+	 * (TransferDialog.svelte) and only shows up here once it's over. Select mode picks several
+	 * tracks from the library to send at once.
 	 */
+
+	let selecting = $state(false);
 
 	/**
 	 * Each section lists the transfers that ended one of these ways. Declined covers every way
@@ -55,7 +60,27 @@
 	}
 </script>
 
-{#if $transferHistory.length === 0}
+{#snippet sendButton()}
+	<Button variant="tonal" onclick={() => (selecting = true)}>
+		<svg
+			xmlns="http://www.w3.org/2000/svg"
+			width="18"
+			height="18"
+			viewBox="0 0 24 24"
+			aria-hidden="true"
+		>
+			<path
+				fill="currentColor"
+				d="m10.6 16.6l7.05-7.05l-1.4-1.4l-5.65 5.65l-2.85-2.85l-1.4 1.4zM12 22q-2.075 0-3.9-.788t-3.175-2.137T2.788 15.9T2 12t.788-3.9t2.137-3.175T8.1 2.788T12 2t3.9.788t3.175 2.137T21.213 8.1T22 12t-.788 3.9t-2.137 3.175t-3.175 2.138T12 22"
+			/>
+		</svg>
+		Select tracks
+	</Button>
+{/snippet}
+
+{#if selecting}
+	<SelectTracks onclose={() => (selecting = false)} />
+{:else if $transferHistory.length === 0}
 	<div class="flex flex-col items-center justify-center py-16 text-center">
 		<div
 			class="bg-surface-container text-on-surface-variant mb-4 flex h-14 w-14 items-center justify-center rounded-full"
@@ -67,11 +92,14 @@
 		</div>
 		<p class="text-on-surface text-lg font-bold">No transfers</p>
 		<p class="text-on-surface-variant mt-1 max-w-xs text-sm">
-			To send a track to another of your devices, open its menu and choose Send to Device.
+			Select tracks to send them to another of your devices, or open a track's menu and choose Send
+			to Device.
 		</p>
+		<div class="mt-5">{@render sendButton()}</div>
 	</div>
 {:else}
 	<!-- Ended this session (kept in memory until reload or Clear) -->
+	<div class="mb-5 flex justify-end">{@render sendButton()}</div>
 	<div class="flex flex-col gap-6">
 		{#each sections as section, i (section.title)}
 			<section aria-label="{section.title} transfers" class="flex flex-col gap-3">
