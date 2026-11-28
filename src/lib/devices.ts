@@ -3,6 +3,8 @@ import { toast } from 'svelte-sonner';
 import { v4 as uuidv4 } from 'uuid';
 import type {
 	OwnDevice,
+	TransferBatch,
+	TransferBatchTrack,
 	TransferEnded,
 	TransferFile,
 	TransferOffer,
@@ -18,6 +20,11 @@ import { IFS } from './ifs';
 import { INTERNAL_LOCATION } from './preferences/usersettings';
 
 const OFFER_TIMEOUT_MS = 10_000;
+// In a batch, the sender offers the next file as soon as the last one ends. If none comes in this
+// long, the receiver stops waiting.
+const NEXT_FILE_TIMEOUT_MS = 30_000;
+/** The most tracks one batch can send (the server's limit). */
+export const MAX_BATCH_TRACKS = 500;
 // How long notices stay up once there's nothing left to cancel.
 const NOTICE_MS = 5_000;
 
@@ -29,6 +36,7 @@ const NO_CONNECTION = "Couldn't connect to the other device.";
 const NO_RESPONSE = 'The other device stopped responding.';
 const CORRUPTED = 'The file arrived damaged.';
 const CANCELLED_BY_YOU = 'You canceled this transfer.';
+const STOPPED_SENDING = 'The other device stopped sending.';
 
 const DEVICE_ID_KEY = 'maple-transfer-device-id';
 // A name the user picked for this browser. Without one, a name is made from the browser and OS.
@@ -61,6 +69,8 @@ export interface IncomingTransfer {
 	 * The user then picks what to do with it.
 	 */
 	duplicate?: { title: string; artist: string; linked: boolean };
+	/** Set when the file is part of an IncomingBatch, which the popup shows instead. */
+	batchId?: string;
 	error?: string;
 }
 
@@ -89,6 +99,8 @@ export interface OutgoingOffer {
 	completed?: boolean;
 	/** This device asked the server to cancel and is waiting for it to confirm. */
 	cancelling?: boolean;
+	/** Set when the file is part of the OutgoingBatch, which the popup shows instead. */
+	batchId?: string;
 	error?: string;
 }
 
@@ -99,10 +111,105 @@ export interface OutgoingOffer {
 export const outgoingOffers = writable<OutgoingOffer[]>([]);
 
 /**
- * The track the user chose "Send to Device" for, while they pick which device gets it.
- * TransferDialog.svelte shows the picker; it's cleared once the offer is sent or abandoned.
+ * The tracks the user chose to send ("Send to Device", or several picked on the Transfers tab),
+ * while they pick which device gets them. TransferDialog.svelte shows the picker; it's cleared
+ * once they're sent (then `onSent` runs) or the picker is closed.
  */
-export const trackToSend = writable<Song | null>(null);
+export const tracksToSend = writable<{ songs: Song[]; onSent?: () => void } | null>(null);
+
+/** How a batch handles a track the library already has: skip it, or as for one track. */
+export type BatchDuplicateChoice = DuplicateChoice | 'skip';
+
+/** One file of the batch this device is sending. */
+export interface OutgoingBatchItem {
+	song: Song;
+	/** What notices call it, e.g. the track's title. */
+	label: string;
+	file: TransferFile;
+	data: Blob;
+}
+
+/**
+ * Several tracks this device is sending to one other device. Each file is its own transfer,
+ * offered once the one before it ends (the server allows one at a time per sender). The other
+ * device accepts the first and then the rest by itself.
+ */
+export interface OutgoingBatch {
+	id: string;
+	target: OwnDevice;
+	items: OutgoingBatchItem[];
+	/** The item on offer or being sent (an index into items). */
+	index: number;
+	/**
+	 * offered: waiting for the other device to accept (shown as a toast). sending: accepted;
+	 * the files go one after another (shown in the transfer popup). done: every file had its
+	 * turn. cancelled / failed: it stopped early; `error` says why.
+	 */
+	status: 'offered' | 'sending' | 'done' | 'cancelled' | 'failed';
+	/** The current item's transfer, once the server has taken its offer. */
+	transferId?: string;
+	/** Bytes of the items whose turn is over, sent or not. */
+	doneBytes: number;
+	/** Items the other device checked and kept. */
+	sent: number;
+	/** Items whose transfer failed (the batch went on without them). */
+	failed: number;
+	/** How each item whose turn is over went, by its index. */
+	results: ('sent' | 'failed')[];
+	/** Tracks the user picked that this device couldn't read, so they were left out. */
+	unreadable: number;
+	/** This device asked to stop the batch and is waiting for the server to confirm. */
+	cancelling?: boolean;
+	error?: string;
+}
+
+/** The batch this device is sending, until the user closes its popup. One at a time. */
+export const outgoingBatch = writable<OutgoingBatch | null>(null);
+
+/** Several tracks another device is sending to this one (see OutgoingBatch). */
+export interface IncomingBatch {
+	id: string;
+	sender: OwnDevice;
+	/** Files still to come when the batch was offered to this device, and their bytes. */
+	count: number;
+	size: number;
+	/**
+	 * Those files' tracks, in order, as the sender listed them. Missing if this tab first heard of
+	 * the batch partway through (only the first offer carries the list).
+	 */
+	tracks?: TransferBatchTrack[];
+	/** The batch index of this device's first file, which `tracks` and `results` count from. */
+	start: number;
+	/** Where the file on offer or arriving now is in `tracks`. */
+	position: number;
+	/**
+	 * pending: waiting for the user. answering: their acceptance is on its way. receiving: the
+	 * files are arriving, and each is added to the library as it does. done: every file had its
+	 * turn. cancelled / failed: it stopped early; `error` says why.
+	 */
+	status: 'pending' | 'answering' | 'receiving' | 'done' | 'cancelled' | 'failed';
+	/** The transfer of the file on offer or arriving now. */
+	transferId?: string;
+	/** Where the files are saved: INTERNAL_LOCATION or a linked folder's ID, and its name. */
+	location: string;
+	folderName?: string;
+	onDuplicate: BatchDuplicateChoice;
+	/** Files whose transfer has ended (any way), and their bytes. */
+	settled: number;
+	doneBytes: number;
+	/** How the settled files went. Adding one to the library finishes a little after it arrives. */
+	imported: number;
+	skipped: number;
+	failed: number;
+	/** How each file went once it's settled and added, by its place in `tracks`. */
+	results: ('imported' | 'skipped' | 'failed')[];
+	/** This device asked to stop the batch and is waiting for the server to confirm. */
+	cancelling?: boolean;
+	error?: string;
+}
+
+/** Batches other devices are sending to this one, oldest first, until the user closes them. */
+export const incomingBatches = writable<IncomingBatch[]>([]);
 
 let socket: MapleSocket | null = null;
 
@@ -140,6 +247,8 @@ export interface FinishedTransfer {
 	outcome: TransferOutcome;
 	/** Why it ended, when there's more to say than the outcome. */
 	detail?: string;
+	/** The batch it was part of, if any. */
+	batch?: string;
 	endedAt: number;
 }
 
@@ -170,7 +279,8 @@ function recordOutgoing(offer: OutgoingOffer, outcome: TransferOutcome, detail?:
 		size: offer.file.size,
 		peer: offer.target.name,
 		outcome,
-		detail
+		detail,
+		batch: offer.batchId
 	});
 }
 
@@ -189,7 +299,8 @@ function recordIncoming(
 		size: transfer.offer.file.size,
 		peer: transfer.offer.sender.name,
 		outcome,
-		detail
+		detail,
+		batch: transfer.batchId
 	});
 }
 
@@ -304,10 +415,20 @@ export function watchDevices(client: MapleSocket) {
 		for (const { offer } of get(incomingTransfers)) {
 			if (!online.has(offer.sender.id)) endIncoming(offer.id, 'disconnected');
 		}
+		// A batch can be between files, with no transfer for the server to end.
+		for (const batch of get(incomingBatches)) {
+			if (!online.has(batch.sender.id)) endIncomingBatch(batch.id, 'failed', ENDED_UNEXPECTEDLY);
+		}
+		const sending = get(outgoingBatch);
+		if (sending && !online.has(sending.target.id)) endOutgoingBatch('failed', ENDED_UNEXPECTEDLY);
 	});
 
 	// TransferDialog.svelte shows these as a popup.
 	client.on('peer:incoming', (offer) => {
+		if (offer.batch) {
+			receiveBatchOffer(offer, offer.batch);
+			return;
+		}
 		incomingTransfers.update((list) => [...list, { offer, status: 'pending', received: 0 }]);
 	});
 
@@ -330,6 +451,13 @@ export function watchDevices(client: MapleSocket) {
 		// The transfer popup takes over from the "waiting" notice.
 		updateOutgoing(transferId, (o) => ({ ...o, status: 'accepted' }));
 		toast.dismiss(transferId);
+		if (offer.batchId) {
+			const batch = get(outgoingBatch);
+			if (batch?.id === offer.batchId && batch.status === 'offered') {
+				outgoingBatch.set({ ...batch, status: 'sending' });
+				toast.dismiss(batch.id);
+			}
+		}
 		// The sender creates its Peer now that the offer is accepted. It connects once
 		// peer:connect brings the receiver's peer ID.
 		openPeer(transferId).catch(() => failOutgoing(transferId, NO_PEER_SERVER));
@@ -385,6 +513,10 @@ export function watchDevices(client: MapleSocket) {
 		// The server ends every transfer this tab was part of when it disconnects.
 		for (const offer of get(outgoingOffers)) endOutgoing(offer, 'disconnected');
 		for (const { offer } of get(incomingTransfers)) endIncoming(offer.id, 'disconnected');
+		for (const batch of get(incomingBatches)) {
+			endIncomingBatch(batch.id, 'failed', ENDED_UNEXPECTEDLY);
+		}
+		endOutgoingBatch('failed', ENDED_UNEXPECTEDLY);
 	});
 }
 
@@ -410,10 +542,23 @@ function failOutgoing(transferId: string, error: string) {
 	if (!offer || isOver(offer) || offer.completed) return;
 	updateOutgoing(transferId, (o) => ({ ...o, status: 'failed', error }));
 	recordOutgoing(offer, 'failed', error);
+	// A batch waits for the server to end this file before offering the next, so tell it now
+	// rather than wait for the receiver to notice.
+	if (offer.batchId) void finishTransfer(transferId, 'failed');
+}
+
+/**
+ * An offer this device sent ended (on the server, or because the other device went offline).
+ * A batch then moves on to its next file.
+ */
+function endOutgoing(offer: OutgoingOffer, reason: TransferEnded['reason']) {
+	const state = get(outgoingOffers).find((o) => o.transferId === offer.transferId) ?? offer;
+	endOutgoingOffer(state, reason);
+	if (state.batchId) outgoingItemEnded(state, reason);
 }
 
 /** Say why an offer this device sent was ended by the other side (or the network). */
-function endOutgoing(offer: OutgoingOffer, reason: TransferEnded['reason']) {
+function endOutgoingOffer(offer: OutgoingOffer, reason: TransferEnded['reason']) {
 	// The server has dropped the transfer, so the Peer has nothing left to do.
 	closePeer(offer.transferId);
 	// Once it's done, the other device going offline afterwards doesn't undo it.
@@ -450,6 +595,8 @@ function endOutgoing(offer: OutgoingOffer, reason: TransferEnded['reason']) {
 	if (reason === 'expired') recordOutgoing(offer, 'expired');
 	else if (reason === 'cancelled') recordOutgoing(offer, 'declined');
 	else recordOutgoing(offer, 'failed', ENDED_UNEXPECTEDLY);
+	// A batch has its own notices (see outgoingItemEnded).
+	if (offer.batchId) return;
 	const what = `"${offer.file.name}"`;
 	// Same id as the "waiting" / "accepted" notice, so this replaces it. The replacement keeps
 	// any option it doesn't set, so the old Cancel button has to be cleared explicitly.
@@ -490,8 +637,18 @@ export function isOver(transfer: { status: string }): boolean {
 	return transfer.status === 'cancelled' || transfer.status === 'failed';
 }
 
-/** Keep an incoming offer the sender (or the network) ended on screen, saying why. */
+/**
+ * An offer to this device ended (on the server, or because the sender went offline). In a
+ * batch, a file that arrived is then added to the library.
+ */
 function endIncoming(id: string, reason: TransferEnded['reason']) {
+	const batchId = get(incomingTransfers).find((t) => t.offer.id === id)?.batchId;
+	endIncomingTransfer(id, reason);
+	if (batchId) incomingItemEnded(batchId, id, reason);
+}
+
+/** Keep an incoming offer the sender (or the network) ended on screen, saying why. */
+function endIncomingTransfer(id: string, reason: TransferEnded['reason']) {
 	// The server has dropped the transfer, so the Peer has nothing left to do.
 	closePeer(id);
 	const transfer = get(incomingTransfers).find((t) => t.offer.id === id);
@@ -515,6 +672,7 @@ function endIncoming(id: string, reason: TransferEnded['reason']) {
 	if (reason === 'expired' && transfer && !isOver(transfer)) {
 		recordIncoming(transfer, 'expired');
 		closeIncoming(id);
+		if (transfer.batchId) return; // the batch says so instead
 		toast.info(DeviceMessage, {
 			componentProps: {
 				before: 'The offer from ',
@@ -557,6 +715,12 @@ export async function answerOffer(id: string, accepted: boolean) {
 	if (!reply.ok) {
 		updateIncoming(id, (t) => ({ ...t, status: 'failed', error: reply.error }));
 		recordIncoming(transfer, 'failed', reply.error);
+		if (transfer.batchId) {
+			// Make sure the sender isn't left waiting for this file, then stop the batch.
+			closeIncoming(id);
+			void cancelTransfer(id);
+			endIncomingBatch(transfer.batchId, 'failed', reply.error);
+		}
 		return;
 	}
 	updateIncoming(id, (t) => ({ ...t, status: 'accepted' }));
@@ -715,7 +879,10 @@ export async function cancelIncoming(id: string) {
  */
 export async function confirmIncoming(
 	id: string,
-	{ location = INTERNAL_LOCATION, onDuplicate }: { location?: string; onDuplicate?: DuplicateChoice } = {}
+	{
+		location = INTERNAL_LOCATION,
+		onDuplicate
+	}: { location?: string; onDuplicate?: DuplicateChoice } = {}
 ) {
 	const transfer = get(incomingTransfers).find((t) => t.offer.id === id);
 	if (!transfer || !isReceived(transfer)) return;
@@ -733,13 +900,31 @@ export async function confirmIncoming(
 		if (!get(incomingTransfers).some((t) => t.offer.id === id)) return; // closed meanwhile
 	}
 
+	await saveReceived(transfer, location, folderName, transfer.duplicate ? onDuplicate : undefined);
+}
+
+/**
+ * Add a file that arrived to the library, record how it went, and close it. Says so in a
+ * notice unless `quiet` (a batch sums it up instead). Resolves with what happened to it.
+ */
+async function saveReceived(
+	transfer: IncomingTransfer,
+	location: string,
+	folderName: string | undefined,
+	onDuplicate: DuplicateChoice | undefined,
+	quiet = false
+): Promise<'imported' | 'skipped' | 'failed'> {
+	const id = transfer.offer.id;
 	const received = receivedFiles.get(id);
 	closeIncoming(id);
 	if (!received) {
 		recordIncoming(transfer, 'failed', 'The file is no longer available.');
-		return;
+		return 'failed';
 	}
 
+	const notify = (show: () => void) => {
+		if (!quiet) show();
+	};
 	const { audio, track } = received;
 	try {
 		// Loaded on demand: the library code pulls in the metadata parser.
@@ -747,30 +932,539 @@ export async function confirmIncoming(
 		const result = await importTransferredTrack(
 			new File([audio], track.fileName, { type: audio.type }),
 			track,
-			transfer.duplicate ? onDuplicate : undefined,
+			onDuplicate,
 			location
 		);
 		const where = folderName ? `Saved in “${folderName}”.` : undefined;
 		const detail = (text?: string) => [text, where].filter(Boolean).join(' ') || undefined;
 		if (result === 'imported') {
 			recordIncoming(transfer, 'imported', detail(), track);
-			toast.success(`Added "${track.title}" to your library.`, { description: where });
+			notify(() =>
+				toast.success(`Added "${track.title}" to your library.`, { description: where })
+			);
 		} else if (result === 'replaced') {
 			recordIncoming(transfer, 'imported', detail('Replaced the copy in your library.'), track);
-			toast.success(`Replaced "${track.title}" in your library.`, { description: where });
+			notify(() =>
+				toast.success(`Replaced "${track.title}" in your library.`, { description: where })
+			);
 		} else if (result === 'kept-both') {
 			recordIncoming(transfer, 'imported', detail('Added as a second copy.'), track);
-			toast.success(`Added another copy of "${track.title}" to your library.`, {
-				description: where
-			});
+			notify(() =>
+				toast.success(`Added another copy of "${track.title}" to your library.`, {
+					description: where
+				})
+			);
 		} else {
-			recordIncoming(transfer, 'imported', 'Already in your library.', track);
-			toast.info(`"${track.title}" is already in your library.`);
+			// A batch set to skip duplicates leaves a track that's already here alone.
+			recordIncoming(transfer, quiet ? 'discarded' : 'imported', 'Already in your library.', track);
+			notify(() => toast.info(`"${track.title}" is already in your library.`));
+			return 'skipped';
 		}
+		return 'imported';
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : 'Something went wrong.';
 		recordIncoming(transfer, 'failed', `Couldn't add it to your library: ${reason}`, track);
-		toast.error(`Couldn't add "${track.title}": ${reason}`);
+		notify(() => toast.error(`Couldn't add "${track.title}": ${reason}`));
+		return 'failed';
+	}
+}
+
+// Batches: several tracks sent to one device together. Each file is still its own transfer
+// (offer, Peer, checksum); the batch offers them one after another and the receiver answers
+// for all of them at once.
+
+/** Whether a batch, either way, has stopped and only needs closing. */
+export function isBatchOver(batch: { status: string }): boolean {
+	return batch.status === 'done' || batch.status === 'cancelled' || batch.status === 'failed';
+}
+
+function updateOutgoingBatch(id: string, change: (batch: OutgoingBatch) => OutgoingBatch) {
+	outgoingBatch.update((batch) => (batch?.id === id ? change(batch) : batch));
+}
+
+/** Stop the batch this device is sending, if it's still going, saying why in its popup. */
+function endOutgoingBatch(status: 'done' | 'cancelled' | 'failed', error?: string) {
+	const batch = get(outgoingBatch);
+	if (!batch || isBatchOver(batch)) return;
+	toast.dismiss(batch.id);
+	// Never accepted, so there's no popup: a notice says what happened instead.
+	if (batch.status === 'offered') {
+		outgoingBatch.set(null);
+		if (status === 'failed') {
+			toast.error(error ?? ENDED_UNEXPECTEDLY, { description: `${batch.items.length} tracks` });
+		}
+		return;
+	}
+	outgoingBatch.set({ ...batch, status, error, transferId: undefined, cancelling: false });
+}
+
+/**
+ * Send several tracks to another device. The other device is asked once; once it accepts, the
+ * files go one at a time and the transfer popup shows how far along they are. `unreadable` is
+ * how many of the tracks the user picked couldn't be read, so they aren't in `items`.
+ */
+export async function sendBatch(
+	target: OwnDevice,
+	items: OutgoingBatchItem[],
+	unreadable = 0
+): Promise<TransferReply> {
+	if (items.length < 2 || items.length > MAX_BATCH_TRACKS) {
+		return { ok: false, error: `Pick between 2 and ${MAX_BATCH_TRACKS} tracks.` };
+	}
+	const current = get(outgoingBatch);
+	if (current && !isBatchOver(current)) {
+		return { ok: false, error: "Wait until the tracks you're sending now are done." };
+	}
+	const batch: OutgoingBatch = {
+		id: uuidv4(),
+		target,
+		items,
+		index: 0,
+		status: 'offered',
+		doneBytes: 0,
+		sent: 0,
+		failed: 0,
+		results: [],
+		unreadable
+	};
+	outgoingBatch.set(batch);
+	// Up before the offer goes out, so an answer that comes back quickly can take it down.
+	toast.info(DeviceMessage, {
+		id: batch.id,
+		componentProps: {
+			before: 'Waiting for ',
+			device: target.name,
+			after: ` to accept ${items.length} tracks`
+		},
+		duration: Number.POSITIVE_INFINITY,
+		action: { label: 'Cancel', onClick: () => void cancelOutgoingBatch() }
+	});
+	const reply = await offerBatchItem(batch.id);
+	if (!reply.ok && get(outgoingBatch)?.id === batch.id) {
+		outgoingBatch.set(null);
+		toast.dismiss(batch.id);
+	}
+	return reply;
+}
+
+/** Offer the batch's current item. */
+async function offerBatchItem(batchId: string): Promise<TransferReply> {
+	const batch = get(outgoingBatch);
+	if (batch?.id !== batchId || isBatchOver(batch)) {
+		return { ok: false, error: 'These tracks are no longer being sent.' };
+	}
+	const item = batch.items[batch.index];
+	const size = batch.items.slice(batch.index).reduce((sum, i) => sum + i.file.size, 0);
+	const reply = await sendOffer(batch.target, item.file, item.data, item.song, item.label, {
+		id: batch.id,
+		index: batch.index,
+		count: batch.items.length,
+		size,
+		// The first offer lists every track, so the other device can show what it's accepting.
+		...(batch.index === 0
+			? {
+					tracks: batch.items.map(({ song }) => ({
+						title: (song.title || song.fileName || '').slice(0, 200),
+						artist: (song.artist || '').slice(0, 200)
+					}))
+				}
+			: {})
+	});
+	if (!reply.ok) return reply;
+	const now = get(outgoingBatch);
+	if (now?.id !== batchId || isBatchOver(now)) {
+		// Stopped while the offer was on its way: withdraw it.
+		void cancelOutgoing(reply.transferId);
+		return reply;
+	}
+	updateOutgoingBatch(batchId, (b) => ({ ...b, transferId: reply.transferId }));
+	return reply;
+}
+
+/** An item of the batch this device is sending ended: move on to the next, or stop. */
+function outgoingItemEnded(offer: OutgoingOffer, reason: TransferEnded['reason']) {
+	// The batch's popup shows its items, so they don't stay in the list once they end.
+	removeOutgoing(offer.transferId);
+	const batch = get(outgoingBatch);
+	if (!batch || batch.id !== offer.batchId || batch.transferId !== offer.transferId) return;
+	if (isBatchOver(batch)) return;
+
+	// The first file was never accepted: the offer for the whole batch was turned down,
+	// expired or dropped. Same notices as for one track.
+	if (batch.status === 'offered') {
+		outgoingBatch.set(null);
+		if (batch.cancelling) {
+			toast.dismiss(batch.id);
+			return;
+		}
+		const what = `${batch.items.length} tracks`;
+		const options = { id: batch.id, duration: NOTICE_MS, action: undefined };
+		if (reason === 'expired') {
+			toast.info(DeviceMessage, {
+				...options,
+				componentProps: { device: batch.target.name, after: " didn't answer in time" },
+				description: `The offer for ${what} expired.`,
+				action: { label: 'Try again', onClick: () => void retryBatch(batch) }
+			});
+		} else if (reason === 'cancelled') {
+			toast.info(DeviceMessage, {
+				...options,
+				componentProps: { device: batch.target.name, after: ` declined ${what}` }
+			});
+		} else {
+			toast.error(ENDED_UNEXPECTEDLY, { ...options, description: what });
+		}
+		return;
+	}
+
+	if (reason === 'completed' || (reason === 'failed' && !batch.cancelling)) {
+		// A file that failed is left out; the rest still go.
+		nextBatchItem(batch, reason === 'completed' ? 'sent' : 'failed');
+	} else if (reason === 'cancelled' || batch.cancelling) {
+		endOutgoingBatch('cancelled', batch.cancelling ? CANCELLED_BY_YOU : CANCELLED_BY_RECEIVER);
+	} else {
+		endOutgoingBatch('failed', ENDED_UNEXPECTEDLY);
+	}
+}
+
+function nextBatchItem(batch: OutgoingBatch, outcome: 'sent' | 'failed') {
+	const finished: OutgoingBatch = {
+		...batch,
+		transferId: undefined,
+		doneBytes: batch.doneBytes + batch.items[batch.index].file.size,
+		sent: batch.sent + (outcome === 'sent' ? 1 : 0),
+		failed: batch.failed + (outcome === 'failed' ? 1 : 0),
+		results: Object.assign([...batch.results], { [batch.index]: outcome })
+	};
+	if (batch.cancelling) {
+		outgoingBatch.set(finished);
+		endOutgoingBatch('cancelled', CANCELLED_BY_YOU);
+		return;
+	}
+	if (batch.index + 1 >= batch.items.length) {
+		outgoingBatch.set({ ...finished, status: 'done' });
+		return;
+	}
+	outgoingBatch.set({ ...finished, index: batch.index + 1 });
+	void offerBatchItem(batch.id).then((reply) => {
+		if (!reply.ok) endOutgoingBatch('failed', reply.error);
+	});
+}
+
+async function retryBatch(batch: OutgoingBatch) {
+	const reply = await sendBatch(batch.target, batch.items, batch.unreadable);
+	if (!reply.ok) toast.error(reply.error);
+}
+
+/**
+ * Stop the batch this device is sending: withdraw the file on offer or being sent, and send
+ * no more. Files already sent stay on the other device.
+ */
+export async function cancelOutgoingBatch() {
+	const batch = get(outgoingBatch);
+	if (!batch || isBatchOver(batch) || batch.cancelling) return;
+	const id = batch.transferId;
+	// Between two files, or the first offer is on its way (offerBatchItem withdraws it).
+	if (!id) {
+		if (batch.status === 'offered') {
+			outgoingBatch.set(null);
+			toast.dismiss(batch.id);
+		} else {
+			endOutgoingBatch('cancelled', CANCELLED_BY_YOU);
+		}
+		return;
+	}
+	updateOutgoingBatch(batch.id, (b) => ({ ...b, cancelling: true }));
+	await cancelOutgoing(id);
+
+	// The server's peer:ended usually ends the batch first (in outgoingItemEnded). If
+	// cancelOutgoing finished without it, end it here.
+	const now = get(outgoingBatch);
+	if (now?.id !== batch.id || !now.cancelling || now.transferId !== id) return;
+	const offer = get(outgoingOffers).find((o) => o.transferId === id);
+	if (offer && !offer.cancelling) {
+		updateOutgoingBatch(batch.id, (b) => ({ ...b, cancelling: false })); // couldn't cancel
+	} else if (!offer) {
+		if (now.status === 'offered') {
+			outgoingBatch.set(null);
+			toast.dismiss(now.id);
+		} else {
+			endOutgoingBatch('cancelled', CANCELLED_BY_YOU);
+		}
+	}
+}
+
+/** Take the batch this device sent off the screen once it has ended. */
+export function closeOutgoingBatch() {
+	const batch = get(outgoingBatch);
+	if (batch && isBatchOver(batch)) outgoingBatch.set(null);
+}
+
+function updateIncomingBatch(id: string, change: (batch: IncomingBatch) => IncomingBatch) {
+	incomingBatches.update((list) => list.map((b) => (b.id === id ? change(b) : b)));
+}
+
+function findIncomingBatch(id: string) {
+	return get(incomingBatches).find((b) => b.id === id);
+}
+
+/** Waiting for the next file of a batch, by batch ID (see NEXT_FILE_TIMEOUT_MS). */
+const nextFileTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clearNextFileTimer(batchId: string) {
+	clearTimeout(nextFileTimers.get(batchId));
+	nextFileTimers.delete(batchId);
+}
+
+function waitForNextFile(batchId: string) {
+	clearNextFileTimer(batchId);
+	const batch = findIncomingBatch(batchId);
+	if (batch?.status !== 'receiving' || batch.settled >= batch.count) return;
+	nextFileTimers.set(
+		batchId,
+		setTimeout(() => {
+			nextFileTimers.delete(batchId);
+			const now = findIncomingBatch(batchId);
+			if (now?.status === 'receiving' && !now.transferId) {
+				endIncomingBatch(batchId, 'failed', STOPPED_SENDING);
+			}
+		}, NEXT_FILE_TIMEOUT_MS)
+	);
+}
+
+/** Stop a batch another device is sending to this one, if it's still going, saying why. */
+function endIncomingBatch(id: string, status: 'done' | 'cancelled' | 'failed', error?: string) {
+	const batch = findIncomingBatch(id);
+	if (!batch || isBatchOver(batch)) return;
+	clearNextFileTimer(id);
+	updateIncomingBatch(id, (b) => ({
+		...b,
+		status,
+		error,
+		transferId: undefined,
+		cancelling: false
+	}));
+}
+
+/**
+ * An offer that's part of a batch arrived. The batch's first file asks the user (for all of
+ * them); once they've accepted, the rest are accepted here as they come.
+ */
+function receiveBatchOffer(offer: TransferOffer, info: TransferBatch) {
+	const transfer: IncomingTransfer = { offer, status: 'pending', received: 0, batchId: info.id };
+	const batch = findIncomingBatch(info.id);
+	if (!batch) {
+		incomingBatches.update((list) => [
+			...list,
+			{
+				id: info.id,
+				sender: offer.sender,
+				count: info.count - info.index,
+				size: info.size,
+				tracks: info.tracks?.slice(info.index),
+				start: info.index,
+				position: 0,
+				status: 'pending',
+				transferId: offer.id,
+				location: INTERNAL_LOCATION,
+				onDuplicate: 'skip',
+				settled: 0,
+				doneBytes: 0,
+				imported: 0,
+				skipped: 0,
+				failed: 0,
+				results: []
+			}
+		]);
+		incomingTransfers.update((list) => [...list, transfer]);
+		return;
+	}
+	if (
+		batch.sender.id !== offer.sender.id ||
+		batch.status !== 'receiving' ||
+		batch.transferId ||
+		batch.cancelling
+	) {
+		// The batch was stopped here (or a file is already arriving): turning this file down
+		// stops the sender too.
+		void respondToOffer(offer.id, false);
+		return;
+	}
+	clearNextFileTimer(batch.id);
+	updateIncomingBatch(batch.id, (b) => ({
+		...b,
+		transferId: offer.id,
+		position: info.index - b.start
+	}));
+	incomingTransfers.update((list) => [...list, transfer]);
+	void answerOffer(offer.id, true);
+}
+
+/**
+ * Accept every file of a batch. Each is added to the library as it arrives: saved to
+ * `location` (INTERNAL_LOCATION or a linked folder's ID), and a track the library already has
+ * is skipped, kept as a second copy or replaced, as `onDuplicate` says.
+ */
+export async function acceptBatch(
+	id: string,
+	{
+		location = INTERNAL_LOCATION,
+		onDuplicate = 'skip'
+	}: { location?: string; onDuplicate?: BatchDuplicateChoice } = {}
+) {
+	const batch = findIncomingBatch(id);
+	if (batch?.status !== 'pending' || !batch.transferId) return;
+	updateIncomingBatch(id, (b) => ({ ...b, status: 'answering' }));
+
+	let folderName: string | undefined;
+	if (location !== INTERNAL_LOCATION) {
+		// Asked first, while the click still counts as a user gesture. If it's refused, the
+		// popup asks again so another place can be picked.
+		try {
+			folderName = (await IFS.requestWriteAccess(location)).name;
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : "Couldn't open that folder.");
+			updateIncomingBatch(id, (b) => (b.status === 'answering' ? { ...b, status: 'pending' } : b));
+			return;
+		}
+	}
+	const now = findIncomingBatch(id);
+	if (now?.status !== 'answering' || !now.transferId) return; // ended meanwhile
+	updateIncomingBatch(id, (b) => ({
+		...b,
+		status: 'receiving',
+		location,
+		folderName,
+		onDuplicate
+	}));
+	await answerOffer(now.transferId, true);
+}
+
+/** Turn down a whole batch. */
+export async function declineBatch(id: string) {
+	const batch = findIncomingBatch(id);
+	if (batch?.status !== 'pending' || !batch.transferId) return;
+	incomingBatches.update((list) => list.filter((b) => b.id !== id));
+	await answerOffer(batch.transferId, false);
+}
+
+/** A file of a batch to this device ended: add it to the library if it arrived, then wait for the next. */
+function incomingItemEnded(batchId: string, id: string, reason: TransferEnded['reason']) {
+	const batch = findIncomingBatch(batchId);
+	const transfer = get(incomingTransfers).find((t) => t.offer.id === id);
+	if (!batch || batch.transferId !== id || isBatchOver(batch)) {
+		closeIncoming(id);
+		return;
+	}
+
+	// Never accepted: the offer for the whole batch was withdrawn, expired or dropped.
+	if (batch.status === 'pending' || batch.status === 'answering') {
+		closeIncoming(id);
+		if (reason === 'expired') {
+			incomingBatches.update((list) => list.filter((b) => b.id !== batchId));
+			toast.info(DeviceMessage, {
+				componentProps: { before: 'The offer from ', device: batch.sender.name, after: ' expired' },
+				description: `${batch.count} tracks`,
+				duration: NOTICE_MS
+			});
+		} else if (reason === 'cancelled') {
+			endIncomingBatch(batchId, 'cancelled', CANCELLED_BY_SENDER);
+		} else {
+			endIncomingBatch(batchId, 'failed', ENDED_UNEXPECTEDLY);
+		}
+		return;
+	}
+
+	updateIncomingBatch(batchId, (b) => ({
+		...b,
+		transferId: undefined,
+		settled: b.settled + 1,
+		doneBytes: b.doneBytes + (transfer?.offer.file.size ?? 0)
+	}));
+
+	const position = batch.position;
+	if (transfer && isReceived(transfer)) {
+		void addBatchItem(batchId, transfer, position);
+	} else {
+		closeIncoming(id);
+		if (reason === 'cancelled') {
+			endIncomingBatch(
+				batchId,
+				'cancelled',
+				batch.cancelling ? CANCELLED_BY_YOU : CANCELLED_BY_SENDER
+			);
+			return;
+		}
+		if (reason !== 'completed' && reason !== 'failed') {
+			endIncomingBatch(batchId, 'failed', ENDED_UNEXPECTEDLY);
+			return;
+		}
+		// This file didn't make it; the sender goes on with the next.
+		countBatchResult(batchId, 'failed', position);
+	}
+	waitForNextFile(batchId);
+}
+
+async function addBatchItem(batchId: string, transfer: IncomingTransfer, position: number) {
+	const batch = findIncomingBatch(batchId);
+	if (!batch) {
+		closeIncoming(transfer.offer.id);
+		return;
+	}
+	const onDuplicate = batch.onDuplicate === 'skip' ? undefined : batch.onDuplicate;
+	const result = await saveReceived(transfer, batch.location, batch.folderName, onDuplicate, true);
+	countBatchResult(batchId, result, position);
+}
+
+function countBatchResult(
+	batchId: string,
+	result: 'imported' | 'skipped' | 'failed',
+	position: number
+) {
+	updateIncomingBatch(batchId, (b) => ({
+		...b,
+		[result]: b[result] + 1,
+		results: Object.assign([...b.results], { [position]: result })
+	}));
+	const batch = findIncomingBatch(batchId);
+	if (
+		batch?.status === 'receiving' &&
+		batch.imported + batch.skipped + batch.failed >= batch.count
+	) {
+		endIncomingBatch(batchId, 'done');
+	}
+}
+
+/**
+ * Stop a batch another device is sending to this one. Tracks already added stay in the
+ * library; the sender is told it was canceled.
+ */
+export async function cancelIncomingBatch(id: string) {
+	const batch = findIncomingBatch(id);
+	if (batch?.status !== 'receiving' || batch.cancelling) return;
+	const current = batch.transferId;
+	// Between two files: the next offer is turned down when it comes (see receiveBatchOffer).
+	if (!current) {
+		endIncomingBatch(id, 'cancelled', CANCELLED_BY_YOU);
+		return;
+	}
+	updateIncomingBatch(id, (b) => ({ ...b, cancelling: true }));
+	await cancelIncoming(current);
+
+	// The server's peer:ended usually ends the batch first (in incomingItemEnded). If
+	// cancelIncoming finished without it, end it here.
+	const now = findIncomingBatch(id);
+	if (!now?.cancelling || now.transferId !== current) return;
+	const transfer = get(incomingTransfers).find((t) => t.offer.id === current);
+	if (!transfer) endIncomingBatch(id, 'cancelled', CANCELLED_BY_YOU);
+	else if (!transfer.cancelling) updateIncomingBatch(id, (b) => ({ ...b, cancelling: false }));
+}
+
+/** Take a batch sent to this device off the screen once it has ended. */
+export function closeIncomingBatch(id: string) {
+	const batch = findIncomingBatch(id);
+	if (batch && isBatchOver(batch)) {
+		incomingBatches.update((list) => list.filter((b) => b.id !== id));
 	}
 }
 
@@ -807,7 +1501,8 @@ export async function sendOffer(
 	file: TransferFile,
 	data: Blob,
 	song: Song,
-	label = file.name
+	label = file.name,
+	batch?: TransferBatch
 ): Promise<TransferReply> {
 	// Send plain metadata without the cover Blob or this device's file location.
 	const track: TransferredTrackMetadata = JSON.parse(
@@ -815,15 +1510,19 @@ export async function sendOffer(
 	);
 
 	const reply = await request((client, ack) =>
-		client.timeout(OFFER_TIMEOUT_MS).emit('peer:offer', { targetDeviceId: target.id, file }, ack)
+		client
+			.timeout(OFFER_TIMEOUT_MS)
+			.emit('peer:offer', { targetDeviceId: target.id, file, ...(batch ? { batch } : {}) }, ack)
 	);
 	if (!reply.ok) return reply;
 
 	const { transferId } = reply;
 	outgoingOffers.update((offers) => [
 		...offers,
-		{ transferId, target, file, data, track, label, status: 'pending', sent: 0 }
+		{ transferId, target, file, data, track, label, status: 'pending', sent: 0, batchId: batch?.id }
 	]);
+	// A batch shows one notice for all its files (see sendBatch).
+	if (batch) return reply;
 	// Stays up until the other device answers. peer:decision then swaps it for the transfer
 	// popup, or endOutgoing replaces it (same id) if the offer is declined, expires or drops.
 	toast.info(DeviceMessage, {

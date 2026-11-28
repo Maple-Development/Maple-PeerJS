@@ -9,9 +9,34 @@ export interface TransferFile {
     type: string
 }
 
+/**
+ * Set when the file is one of several sent together. The receiver accepts the first offer of a
+ * batch and its device then accepts the rest itself, one at a time, as they arrive.
+ */
+export interface TransferBatch {
+    id: string
+    /** This file's place in the batch, from 0. */
+    index: number
+    /** How many files the batch has in all. */
+    count: number
+    /** Bytes of this file and every file after it in the batch. */
+    size: number
+    /**
+     * Sent with the first file only: every track in the batch, in order, so the receiver can
+     * see what it's accepting.
+     */
+    tracks?: TransferBatchTrack[]
+}
+
+export interface TransferBatchTrack {
+    title: string
+    artist: string
+}
+
 export interface TransferRequest {
     targetDeviceId: string
     file: TransferFile
+    batch?: TransferBatch
 }
 
 export interface TransferOffer {
@@ -19,6 +44,7 @@ export interface TransferOffer {
     sender: OwnDevice
     targetDeviceId: string
     file: TransferFile
+    batch?: TransferBatch
 }
 
 export interface TransferDecision {

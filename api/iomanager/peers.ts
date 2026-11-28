@@ -166,7 +166,8 @@ export class PeerManager {
 				id: randomUUID(),
 				sender: { ...sender.device },
 				targetDeviceId: target.device.id,
-				file: parsed.data.file
+				file: parsed.data.file,
+				...(parsed.data.batch ? { batch: parsed.data.batch } : {})
 			};
 
 			const expiryTimer = setTimeout(() => {

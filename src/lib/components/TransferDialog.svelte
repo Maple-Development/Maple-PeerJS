@@ -12,25 +12,40 @@
 	import { isLoggedIn, socialTab } from '$lib/store';
 	import DeviceMessage from './DeviceMessage.svelte';
 	import SelectMenu from './SelectMenu.svelte';
+	import BatchTracks, { type BatchTrackRow } from './BatchTracks.svelte';
 	import {
+		acceptBatch,
 		answerOffer,
 		cancelIncoming,
+		cancelIncomingBatch,
 		cancelOutgoing,
+		cancelOutgoingBatch,
 		closeIncoming,
+		closeIncomingBatch,
 		closeOutgoing,
+		closeOutgoingBatch,
 		confirmIncoming,
+		declineBatch,
 		devices,
 		formatSize,
+		incomingBatches,
 		incomingTransfers,
+		isBatchOver,
 		isOver,
 		isReceived,
 		isSent,
+		outgoingBatch,
 		outgoingOffers,
 		renameSelf,
 		selfId,
+		sendBatch,
 		sendOffer,
-		trackToSend,
-		transferHistory
+		tracksToSend,
+		transferHistory,
+		type BatchDuplicateChoice,
+		type IncomingBatch,
+		type OutgoingBatch,
+		type OutgoingBatchItem
 	} from '$lib/devices';
 
 	const MAX_NAME = 40;
@@ -38,15 +53,31 @@
 	// Once a transfer succeeds (sent, or added to this library), go to the Social page's
 	// Transfers tab, where finished transfers are listed. Declined, canceled and failed ones are
 	// listed too, but don't navigate away from what the user is doing.
+	// A batch does so once it's done rather than after its first track.
 	let lastFinishedId: string | undefined;
 	$effect(() => {
 		const latest = $transferHistory[0];
 		if (!latest || latest.id === lastFinishedId) return;
 		lastFinishedId = latest.id;
-		if (latest.outcome !== 'sent' && latest.outcome !== 'imported') return;
+		if (latest.batch || (latest.outcome !== 'sent' && latest.outcome !== 'imported')) return;
+		showTransfers();
+	});
+	let lastDoneBatch: string | undefined;
+	$effect(() => {
+		const done = [batchIn, batchOut].find(
+			(b) =>
+				b?.status === 'done' &&
+				(('imported' in b && b.imported > 0) || ('items' in b && b.sent > 0))
+		);
+		if (!done || done.id === lastDoneBatch) return;
+		lastDoneBatch = done.id;
+		showTransfers();
+	});
+
+	function showTransfers() {
 		socialTab.set('transfers');
 		if (untrack(() => page.url.pathname) !== resolve('/friends')) goto(resolve('/friends'));
-	});
+	}
 
 	/** One transfer as the popup sees it, whichever way it's going. */
 	interface Shown {
@@ -71,10 +102,19 @@
 		error?: string;
 	}
 
-	// One transfer at a time. Offers to this device come first, since they need an answer;
-	// this device's own transfers show up here once the other side accepts.
+	// One thing at a time. Offers to this device come first, since they need an answer (a batch,
+	// several tracks at once, before a single track); this device's own transfers show up here
+	// once the other side accepts. Files that are part of a batch are shown by their batch.
+	let batchIn: IncomingBatch | undefined = $derived($incomingBatches[0]);
+	let singleIn = $derived($incomingTransfers.find((t) => !t.batchId));
+	let batchOut: OutgoingBatch | undefined = $derived(
+		$outgoingBatch && $outgoingBatch.status !== 'offered' ? $outgoingBatch : undefined
+	);
+	let showBatchOut = $derived(!batchIn && !singleIn && !!batchOut);
+
 	let current: Shown | undefined = $derived.by(() => {
-		const incoming = $incomingTransfers[0];
+		if (batchIn) return undefined;
+		const incoming = singleIn;
 		if (incoming) {
 			return {
 				id: incoming.offer.id,
@@ -90,8 +130,9 @@
 				error: incoming.error
 			};
 		}
+		if (batchOut) return undefined;
 		// Pending offers are shown as a toast instead (see sendOffer in devices.ts), even while canceling.
-		const outgoing = $outgoingOffers.find((o) => o.status !== 'pending');
+		const outgoing = $outgoingOffers.find((o) => !o.batchId && o.status !== 'pending');
 		if (outgoing) {
 			return {
 				id: outgoing.transferId,
@@ -110,35 +151,106 @@
 		return undefined;
 	});
 
-	// Picking a device for "Send to Device". A transfer that needs the popup goes first: an
+	// Picking a device to send tracks to. A transfer that needs the popup goes first: an
 	// offer that arrives mid-pick is answered, then the picker comes back.
-	let picking = $derived(!current && !!$trackToSend);
+	let picking = $derived(!current && !batchIn && !showBatchOut && !!$tracksToSend);
+	/** The tracks being picked for. */
+	let songs = $derived($tracksToSend?.songs ?? []);
 
 	// Writable so the dialog can close itself; it reopens whenever another transfer is queued.
-	let open = $derived(!!current || picking);
+	let open = $derived(!!current || picking || !!batchIn || showBatchOut);
 
 	let over = $derived(!!current && isOver(current));
 	let answered = $derived(current?.status === 'accepted' || over);
 	let incoming = $derived(current?.direction === 'in');
 
+	// The batch being sent or received, and the bytes of it that have gone so far (the files
+	// that are done plus the one in progress).
+	let batchInBytes = $derived(
+		batchIn
+			? batchIn.doneBytes +
+					($incomingTransfers.find((t) => t.offer.id === batchIn.transferId)?.received ?? 0)
+			: 0
+	);
+	let batchOutSize = $derived(batchOut?.items.reduce((sum, i) => sum + i.file.size, 0) ?? 0);
+	let batchOutBytes = $derived(
+		batchOut
+			? batchOut.doneBytes +
+					($outgoingOffers.find((o) => o.transferId === batchOut.transferId)?.sent ?? 0)
+			: 0
+	);
+
+	function batchHeadline(status: string, receiving: boolean) {
+		switch (status) {
+			case 'pending':
+			case 'answering':
+				return 'Incoming tracks';
+			case 'receiving':
+				return 'Receiving tracks';
+			case 'sending':
+				return 'Sending tracks';
+			case 'done':
+				return receiving ? 'Tracks received' : 'Tracks sent';
+			case 'cancelled':
+				return 'Transfer canceled';
+			default:
+				return 'Transfer ended';
+		}
+	}
+
+	/** How a batch's files went so far, e.g. "10 added to your library · 2 already there". */
+	function incomingSummary(batch: IncomingBatch) {
+		return [
+			batch.imported &&
+				`${batch.imported} added to your library${batch.folderName ? ` in “${batch.folderName}”` : ''}`,
+			batch.skipped && `${batch.skipped} already there`,
+			batch.failed && `${batch.failed} failed`
+		]
+			.filter(Boolean)
+			.join(' · ');
+	}
+
+	function outgoingSummary(batch: OutgoingBatch) {
+		return [
+			batch.sent && `${batch.sent} sent`,
+			batch.failed && `${batch.failed} failed`,
+			batch.unreadable && `${batch.unreadable} couldn't be read on this device`
+		]
+			.filter(Boolean)
+			.join(' · ');
+	}
+
+	const DUPLICATE_OPTIONS: { id: BatchDuplicateChoice; name: string }[] = [
+		{ id: 'skip', name: 'Skip them' },
+		{ id: 'keep-both', name: 'Keep both' },
+		{ id: 'replace', name: 'Replace them' }
+	];
+	let batchDuplicates = $state<BatchDuplicateChoice>('skip');
+
 	let headline = $derived(
-		picking
-			? 'Send track'
-			: !current
-				? ''
-				: current.status === 'accepted'
-					? incoming
-						? current.done
-							? 'Track received'
-							: 'Receiving track'
-						: current.done
-							? 'Track sent'
-							: 'Sending track'
-					: current.status === 'cancelled'
-						? 'Transfer canceled'
-						: current.status === 'failed'
-							? 'Transfer ended'
-							: 'Incoming track'
+		batchIn
+			? batchHeadline(batchIn.status, true)
+			: showBatchOut && batchOut
+				? batchHeadline(batchOut.status, false)
+				: picking
+					? songs.length > 1
+						? 'Send tracks'
+						: 'Send track'
+					: !current
+						? ''
+						: current.status === 'accepted'
+							? incoming
+								? current.done
+									? 'Track received'
+									: 'Receiving track'
+								: current.done
+									? 'Track sent'
+									: 'Sending track'
+							: current.status === 'cancelled'
+								? 'Transfer canceled'
+								: current.status === 'failed'
+									? 'Transfer ended'
+									: 'Incoming track'
 	);
 
 	// The text around the other device's name, which is shown in bold between the two.
@@ -173,10 +285,20 @@
 			.map((f) => ({ id: f.id, name: f.handle.name }))
 	]);
 	let pickedLocation = $state<string>(INTERNAL_LOCATION);
-	let incomingId = $derived(incoming ? current?.id : undefined);
+	// The offer being answered: a batch waiting for an answer, or a single incoming track.
+	let incomingId = $derived(
+		batchIn
+			? batchIn.status === 'pending'
+				? batchIn.id
+				: undefined
+			: incoming
+				? current?.id
+				: undefined
+	);
 	$effect(() => {
 		if (!incomingId) return;
 		pickedLocation = UserSettings.preferences.transferLocation;
+		batchDuplicates = 'skip';
 		IFS.loadFolders().catch(() => {});
 	});
 	// A folder that was unlinked since falls back to internal storage.
@@ -191,34 +313,86 @@
 	// The first device is picked until the user picks another, or if theirs goes offline.
 	let target = $derived(targets.find((d) => d.id === pickedId) ?? targets[0]);
 
-	/** The track's file: undefined while it loads, null if it couldn't be read. */
-	let songFile = $state<Blob | null>();
+	/** One file per track being picked for, once loaded (null if it couldn't be read). */
+	let songFiles = $state<(File | null)[]>();
+	/** The single track's file: undefined while it loads, null if it couldn't be read. */
+	let songFile = $derived(songFiles?.[0]);
+	let readableCount = $derived(songFiles?.filter(Boolean).length ?? 0);
+	let unreadableCount = $derived(songFiles ? songFiles.length - readableCount : 0);
+	let pickedSize = $derived(songFiles?.reduce((sum, f) => sum + (f?.size ?? 0), 0) ?? 0);
+
+	// Each batch's tracks for its card's list, and how far along each one is.
+	let pickedRows: BatchTrackRow[] = $derived(
+		songs.map((s, i) => ({
+			title: s.title,
+			artist: s.artist,
+			status: songFiles?.[i] === null ? 'unreadable' : undefined
+		}))
+	);
+	let batchInRows: BatchTrackRow[] | undefined = $derived(
+		batchIn?.tracks?.map((track, i) => {
+			const result = batchIn.results[i];
+			const status =
+				result === 'imported'
+					? 'done'
+					: result
+						? result
+						: batchIn.status === 'pending' || batchIn.status === 'answering'
+							? undefined
+							: i < batchIn.settled || (i === batchIn.position && batchIn.transferId)
+								? 'active'
+								: 'waiting';
+			return { ...track, status };
+		})
+	);
+	let batchOutRows: BatchTrackRow[] | undefined = $derived(
+		batchOut?.items.map(({ song }, i) => {
+			const result = batchOut.results[i];
+			const status =
+				result === 'sent'
+					? 'done'
+					: result
+						? result
+						: i === batchOut.index && batchOut.status === 'sending'
+							? 'active'
+							: 'waiting';
+			return { title: song.title, artist: song.artist, status };
+		})
+	);
 	let artwork = $state<string>();
 	let sending = $state(false);
 	let sendError = $state<string>();
 	let renaming = $state(false);
 	let draftName = $state('');
 
-	// Start each pick fresh, and load the track's file (its size is shown, and it's what gets
-	// sent) and its artwork.
+	// Start each pick fresh, and load the tracks' files (their size is shown, and they're what
+	// gets sent) and, for one track, its artwork.
 	$effect(() => {
-		const song = $trackToSend;
+		const picked = $tracksToSend?.songs ?? [];
 		pickedId = null;
-		songFile = undefined;
+		songFiles = undefined;
 		artwork = undefined;
 		sendError = undefined;
 		renaming = false;
-		if (!song) return;
+		if (!picked.length) return;
 
 		let stale = false;
-		openTrackFile(song).then(
-			(file) => {
-				if (!stale) songFile = file ?? null;
-			},
-			() => {
-				if (!stale) songFile = null;
-			}
-		);
+		Promise.all(
+			picked.map((s) =>
+				openTrackFile(s).then(
+					(file) => file ?? null,
+					() => null
+				)
+			)
+		).then((files) => {
+			if (!stale) songFiles = files;
+		});
+		const song = picked[0];
+		if (picked.length > 1) {
+			return () => {
+				stale = true;
+			};
+		}
 		let ownUrl: string | undefined;
 		if (song.image instanceof Blob) {
 			artwork = ownUrl = URL.createObjectURL(song.image);
@@ -237,32 +411,38 @@
 	});
 
 	async function sendPicked() {
-		const song = $trackToSend;
+		const picked = $tracksToSend;
 		const to = target;
-		const data = songFile;
-		if (!song || !to || !data || sending) return;
+		const files = songFiles;
+		if (!picked || !to || !files || sending) return;
+		// Tracks that couldn't be read are left out.
+		const items: OutgoingBatchItem[] = picked.songs.flatMap((song, i) => {
+			const data = files[i];
+			if (!data) return [];
+			const name = song.fileName || `${song.title}.${song.ext}`;
+			return [{ song, label: song.title, data, file: { name, size: data.size, type: data.type } }];
+		});
+		if (!items.length) return;
 		sending = true;
 		sendError = undefined;
-		// The file goes with the offer; devices.ts sends it once the other device accepts.
-		const reply = await sendOffer(
-			to,
-			{ name: song.fileName || `${song.title}.${song.ext}`, size: data.size, type: data.type },
-			data,
-			song,
-			song.title
-		);
+		// The files go with the offer; devices.ts sends them once the other device accepts.
+		const reply =
+			items.length === 1
+				? await sendOffer(to, items[0].file, items[0].data, items[0].song, items[0].label)
+				: await sendBatch(to, items, picked.songs.length - items.length);
 		sending = false;
-		// From here a "waiting" notice (from sendOffer) takes over until the other device answers.
+		// From here a "waiting" notice takes over until the other device answers.
 		if (reply.ok) {
-			if ($trackToSend === song) trackToSend.set(null);
+			if ($tracksToSend === picked) tracksToSend.set(null);
+			picked.onSent?.();
 		} else {
 			sendError = reply.error;
 		}
 	}
 
 	function signIn() {
-		trackToSend.set(null);
-		goto('/login');
+		tracksToSend.set(null);
+		goto(resolve('/login'));
 	}
 
 	function startRename() {
@@ -293,13 +473,29 @@
 	}
 
 	// The picker can always be dismissed (except while renaming, where Esc only cancels that).
-	// A transfer only once it has ended: the others need a deliberate choice, and closing an
-	// accepted one would cancel it.
-	let dismissable = $derived(current ? over : !renaming);
+	// A transfer or batch only once it has ended: the others need a deliberate choice, and
+	// closing an accepted one would cancel it.
+	let dismissable = $derived(
+		batchIn
+			? isBatchOver(batchIn)
+			: showBatchOut && batchOut
+				? isBatchOver(batchOut)
+				: current
+					? over
+					: !renaming
+	);
 
 	function close() {
+		if (batchIn) {
+			closeIncomingBatch(batchIn.id);
+			return;
+		}
+		if (showBatchOut) {
+			closeOutgoingBatch();
+			return;
+		}
 		if (!current) {
-			trackToSend.set(null);
+			tracksToSend.set(null);
 			return;
 		}
 		if (!over) return;
@@ -324,13 +520,13 @@
 	// Stopping the key itself means the dialog never starts to close. The rename field still
 	// sees the key, and cancels the rename.
 	function blockEsc(e: KeyboardEvent) {
-		if (e.key === 'Escape' && (current ? !over : renaming)) e.preventDefault();
+		if (e.key === 'Escape' && open && !dismissable) e.preventDefault();
 	}
 
 	// Closing an ended transfer can leave the next one hidden, and the browser may still close
 	// the popup some other way. Show it again while anything is waiting.
 	function reopen(e: Event) {
-		if (!current && !picking) return;
+		if (!current && !picking && !batchIn && !showBatchOut) return;
 		const dialog = e.currentTarget as HTMLDialogElement;
 		if (!open)
 			open = true; // the Dialog's own effect calls showModal
@@ -350,7 +546,126 @@
 	onclose={reopen}
 	style={picking ? 'width: min(31rem, calc(100vw - 2rem));' : undefined}
 >
-	{#if current}
+	{#if batchIn}
+		{@const batch = batchIn}
+		{@const answering = batch.status === 'pending' || batch.status === 'answering'}
+		{@const summary = incomingSummary(batch)}
+		<div class="flex w-80 max-w-full flex-col gap-4">
+			{#if answering}
+				<p>
+					<DeviceMessage
+						device={batch.sender.name}
+						after=" wants to send you {batch.count} tracks."
+					/>
+				</p>
+			{/if}
+
+			{#snippet batchInDetails()}
+				{formatSize(batch.size)}{#if !answering}<DeviceMessage
+						before=" from "
+						device={batch.sender.name}
+					/>{/if}
+			{/snippet}
+			<BatchTracks title="{batch.count} tracks" details={batchInDetails} tracks={batchInRows} />
+
+			{#if answering}
+				{#if saveOptions.length > 1}
+					<div class="text-on-surface-variant flex items-center justify-between gap-3 text-xs">
+						<label for="transfer-save-to" class="font-semibold">Save to</label>
+						<SelectMenu
+							id="transfer-save-to"
+							size="sm"
+							options={saveOptions}
+							bind:value={() => saveLocation, (v) => (pickedLocation = v)}
+							disabled={batch.status === 'answering'}
+							class="max-w-52"
+						/>
+					</div>
+				{/if}
+				<div class="text-on-surface-variant flex items-center justify-between gap-3 text-xs">
+					<label for="transfer-duplicates" class="font-semibold">Tracks you already have</label>
+					<SelectMenu
+						id="transfer-duplicates"
+						size="sm"
+						options={DUPLICATE_OPTIONS}
+						bind:value={() => batchDuplicates, (v) => (batchDuplicates = v as BatchDuplicateChoice)}
+						disabled={batch.status === 'answering'}
+						class="max-w-52"
+					/>
+				</div>
+			{:else if batch.status === 'receiving'}
+				{@const arriving = batch.settled < batch.count}
+				<div class="flex flex-col gap-2">
+					<LinearProgress percent={batch.size > 0 ? (batchInBytes / batch.size) * 100 : 0} />
+					<div class="text-on-surface-variant flex justify-between gap-3 text-xs">
+						<span
+							>{#if arriving}<DeviceMessage
+									before="Receiving {batch.settled + 1} of {batch.count} from "
+									device={batch.sender.name}
+									after="…"
+								/>{:else}Adding to your library…{/if}</span
+						>
+						<span class="flex-shrink-0">{formatSize(batchInBytes)} of {formatSize(batch.size)}</span
+						>
+					</div>
+				</div>
+			{/if}
+
+			{#if !answering && summary}
+				<p class="text-on-surface-variant text-sm">{summary}.</p>
+			{/if}
+			{#if batch.status === 'receiving'}
+				<p class="text-on-surface-variant text-xs">
+					Canceling stops the rest. Tracks already added stay in your library.
+				</p>
+			{:else if batch.status === 'cancelled'}
+				<p class="text-on-surface-variant">{batch.error}</p>
+			{:else if batch.status === 'failed'}
+				<p class="text-error">{batch.error}</p>
+			{/if}
+		</div>
+	{:else if showBatchOut && batchOut}
+		{@const batch = batchOut}
+		{@const summary = outgoingSummary(batch)}
+		<div class="flex w-80 max-w-full flex-col gap-4">
+			{#snippet batchOutDetails()}
+				{formatSize(batchOutSize)}<DeviceMessage before=" to " device={batch.target.name} />
+			{/snippet}
+			<BatchTracks
+				title="{batch.items.length} tracks"
+				details={batchOutDetails}
+				tracks={batchOutRows}
+			/>
+
+			{#if batch.status === 'sending'}
+				{@const item = batch.items[batch.index]}
+				<div class="flex flex-col gap-2">
+					<LinearProgress percent={batchOutSize > 0 ? (batchOutBytes / batchOutSize) * 100 : 0} />
+					<div class="text-on-surface-variant flex justify-between gap-3 text-xs">
+						<span class="min-w-0 truncate" title={item?.label}
+							><DeviceMessage
+								before="Sending {batch.index + 1} of {batch.items.length} to "
+								device={batch.target.name}
+								after="…"
+							/></span
+						>
+						<span class="flex-shrink-0"
+							>{formatSize(batchOutBytes)} of {formatSize(batchOutSize)}</span
+						>
+					</div>
+				</div>
+			{/if}
+
+			{#if summary}
+				<p class="text-on-surface-variant text-sm">{summary}.</p>
+			{/if}
+			{#if batch.status === 'cancelled'}
+				<p class="text-on-surface-variant">{batch.error}</p>
+			{:else if batch.status === 'failed'}
+				<p class="text-error">{batch.error}</p>
+			{/if}
+		</div>
+	{:else if current}
 		{@const shown = current}
 		<div class="flex w-80 max-w-full flex-col gap-4">
 			{#if shown.status === 'pending' || shown.status === 'answering'}
@@ -414,13 +729,24 @@
 				<p class="text-error">{shown.error}</p>
 			{/if}
 		</div>
-	{:else if picking && $trackToSend}
-		{@const song = $trackToSend}
+	{:else if picking && songs.length}
+		{@const song = songs[0]}
+		{@const multi = songs.length > 1}
 		<div class="flex flex-col gap-4">
-			{#snippet songDetails()}
-				{song.artist || 'Unknown artist'}{songFile ? ` · ${formatSize(songFile.size)}` : ''}
-			{/snippet}
-			{@render trackCard(song.title || 'Untitled', artwork, songDetails)}
+			{#if multi}
+				{@const artists = new Set(songs.map((s) => s.artist || 'Unknown artist'))}
+				{#snippet tracksDetails()}
+					{artists.size === 1 ? [...artists][0] : `${artists.size} artists`}{songFiles
+						? ` · ${formatSize(pickedSize)}`
+						: ''}
+				{/snippet}
+				<BatchTracks title="{songs.length} tracks" details={tracksDetails} tracks={pickedRows} />
+			{:else}
+				{#snippet songDetails()}
+					{song.artist || 'Unknown artist'}{songFile ? ` · ${formatSize(songFile.size)}` : ''}
+				{/snippet}
+				{@render trackCard(song.title || 'Untitled', artwork, songDetails)}
+			{/if}
 
 			{#if !$isLoggedIn}
 				<p class="text-on-surface-variant text-sm">Sign in to send tracks to your other devices.</p>
@@ -500,7 +826,13 @@
 				</div>
 			{/if}
 
-			{#if songFile === null}
+			{#if multi && unreadableCount}
+				<p class="text-error text-xs">
+					{unreadableCount === songs.length
+						? "Couldn't read these tracks from this device."
+						: `${unreadableCount} of these tracks can't be read from this device and won't be sent.`}
+				</p>
+			{:else if !multi && songFile === null}
 				<p class="text-error text-xs">Couldn't read "{song.title}" from this device.</p>
 			{:else if sendError}
 				<p class="text-error text-xs">{sendError}</p>
@@ -509,7 +841,37 @@
 	{/if}
 
 	{#snippet buttons()}
-		{#if current && !answered}
+		{#if batchIn}
+			{@const id = batchIn.id}
+			{#if batchIn.status === 'pending' || batchIn.status === 'answering'}
+				{@const busy = batchIn.status === 'answering'}
+				<Button variant="text" disabled={busy} onclick={() => declineBatch(id)}>Decline</Button>
+				<Button
+					variant="filled"
+					disabled={busy}
+					onclick={() => acceptBatch(id, { location: saveLocation, onDuplicate: batchDuplicates })}
+					>Accept all</Button
+				>
+			{:else if batchIn.status === 'receiving'}
+				<Button variant="text" disabled={batchIn.cancelling} onclick={() => cancelIncomingBatch(id)}
+					>{batchIn.cancelling ? 'Canceling…' : 'Cancel'}</Button
+				>
+			{:else}
+				<Button variant={batchIn.status === 'done' ? 'filled' : 'text'} onclick={close}
+					>{batchIn.status === 'done' ? 'Done' : 'Close'}</Button
+				>
+			{/if}
+		{:else if showBatchOut && batchOut}
+			{#if batchOut.status === 'sending'}
+				<Button variant="text" disabled={batchOut.cancelling} onclick={() => cancelOutgoingBatch()}
+					>{batchOut.cancelling ? 'Canceling…' : 'Cancel'}</Button
+				>
+			{:else}
+				<Button variant={batchOut.status === 'done' ? 'filled' : 'text'} onclick={close}
+					>{batchOut.status === 'done' ? 'Done' : 'Close'}</Button
+				>
+			{/if}
+		{:else if current && !answered}
 			{@const id = current.id}
 			{@const busy = current.status === 'answering'}
 			<Button variant="text" disabled={busy} onclick={() => answerOffer(id, false)}>Decline</Button>
@@ -526,12 +888,16 @@
 				<Button variant="text" disabled={busy} onclick={() => cancel(id)}
 					>{busy ? 'Discarding…' : 'Discard'}</Button
 				>
-				<Button variant="tonal" disabled={busy} onclick={() =>
-						confirmIncoming(id, { location: saveLocation, onDuplicate: 'keep-both' })}
+				<Button
+					variant="tonal"
+					disabled={busy}
+					onclick={() => confirmIncoming(id, { location: saveLocation, onDuplicate: 'keep-both' })}
 					>Keep both</Button
 				>
-				<Button variant="filled" disabled={busy} onclick={() =>
-						confirmIncoming(id, { location: saveLocation, onDuplicate: 'replace' })}
+				<Button
+					variant="filled"
+					disabled={busy}
+					onclick={() => confirmIncoming(id, { location: saveLocation, onDuplicate: 'replace' })}
 					>Replace</Button
 				>
 			{:else}
@@ -551,7 +917,11 @@
 		{:else if picking}
 			<Button variant="text" onclick={close}>Cancel</Button>
 			{#if $isLoggedIn}
-				<Button variant="filled" onclick={sendPicked} disabled={!target || !songFile || sending}>
+				<Button
+					variant="filled"
+					onclick={sendPicked}
+					disabled={!target || !readableCount || sending}
+				>
 					{sending ? 'Sending…' : target ? `Send to ${target.name}` : 'Send'}
 				</Button>
 			{:else}

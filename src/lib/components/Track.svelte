@@ -12,7 +12,7 @@
 	import { startPlayback } from '$lib/player';
 	import { recentlyPlayedManager, type QueueSource } from '$lib/store';
 	import { confirmDialog } from '$lib/confirm.svelte';
-	import { trackToSend } from '$lib/devices';
+	import { tracksToSend } from '$lib/devices';
 
 	const DEFAULT_PLACEHOLDER =
 		'https://raw.githubusercontent.com/Cattn/Maple/8c1ab06960d3cec36714bf99cd6cee4ebb53913a/static/temp/MapleD.svg';
@@ -305,7 +305,7 @@
 			hideSubmenuTimeout = null;
 		}
 		// TransferDialog (in the root layout) shows the device picker.
-		if (track) trackToSend.set(track);
+		if (track) tracksToSend.set({ songs: [track] });
 	}
 
 	function handlePlaylistHover() {
