@@ -12,7 +12,9 @@ export const transferRequestSchema = z.object({
 
 export const deviceRegistrationSchema = z.object({
 	id: z.uuid(),
-	name: z.string().trim().min(1).max(40)
+	name: z.string().trim().min(1).max(40),
+	// Clients from before this field register without it.
+	kind: z.enum(['mobile', 'desktop']).catch('desktop')
 });
 
 export const transferDecisionSchema = z.object({
