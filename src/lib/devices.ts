@@ -55,9 +55,10 @@ export interface IncomingTransfer {
 	cancelling?: boolean;
 	/**
 	 * Once the file has arrived: the track already in this library that it duplicates (same ID,
-	 * or same title and artist). The user then picks what to do with it.
+	 * or same title and artist), whether Maple stores it or it is in a linked folder (`linked`).
+	 * The user then picks what to do with it.
 	 */
-	duplicate?: { title: string; artist: string };
+	duplicate?: { title: string; artist: string; linked: boolean };
 	error?: string;
 }
 
@@ -624,7 +625,11 @@ async function startReceiving(offer: TransferOffer) {
 			const { findDuplicateTrack } = await import('./library');
 			const existing = await findDuplicateTrack(track);
 			if (existing) {
-				const duplicate = { title: existing.title, artist: existing.artist };
+				const duplicate = {
+					title: existing.title,
+					artist: existing.artist,
+					linked: existing.source?.kind === 'linked-folder'
+				};
 				updateIncoming(id, (t) => ({ ...t, duplicate }));
 			}
 		} catch {

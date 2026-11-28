@@ -64,7 +64,7 @@
 		/** Waiting for the server to confirm a cancel. */
 		cancelling: boolean;
 		/** Incoming only: the library already has this track (see IncomingTransfer). */
-		duplicate?: { title: string; artist: string };
+		duplicate?: { title: string; artist: string; linked: boolean };
 		error?: string;
 	}
 
@@ -363,7 +363,10 @@
 						You already have <span class="text-on-surface font-semibold"
 							>{shown.duplicate.title}</span
 						>{shown.duplicate.artist ? ` by ${shown.duplicate.artist}` : ''}. Keep both, or
-						replace the one you have? Replacing keeps its place in your playlists.
+						replace the one you have? Replacing keeps its place in your playlists{shown.duplicate
+							.linked
+							? ', and removes the old one from your library but not from its linked folder'
+							: ''}.
 					</p>
 				{/if}
 			{:else if shown.status === 'cancelled'}

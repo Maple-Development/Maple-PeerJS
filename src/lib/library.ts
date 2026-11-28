@@ -120,19 +120,22 @@ async function parseMetadataFast(file: File) {
 /**
  * What to do with a transferred track the library already has. keep-both: add it alongside the
  * one already there. replace: add it, then delete the old one (it takes the old one's place in
- * playlists).
+ * playlists). Replacing a track from a linked folder only removes it from the library: its file
+ * stays in the folder.
  */
 export type DuplicateChoice = 'keep-both' | 'replace';
 
 /**
- * The library track a transferred one would duplicate: one Maple stores itself (not one in a
- * linked folder) with the same ID, or else with the same title and artist.
+ * The library track a transferred one would duplicate, wherever it lives (stored by Maple or in a
+ * linked folder): one with the same ID, or else one with the same title and artist, preferring a
+ * copy Maple stores itself.
  */
 function findDuplicate(tracks: Song[], metadata: Pick<Song, 'id' | 'title' | 'artist'>) {
-	const managed = tracks.filter((t) => t.source?.kind !== 'linked-folder');
+	const matches = tracks.filter((t) => t.title === metadata.title && t.artist === metadata.artist);
 	return (
-		managed.find((t) => t.id === metadata.id) ??
-		managed.find((t) => t.title === metadata.title && t.artist === metadata.artist)
+		tracks.find((t) => t.id === metadata.id) ??
+		matches.find((t) => t.source?.kind !== 'linked-folder') ??
+		matches[0]
 	);
 }
 
