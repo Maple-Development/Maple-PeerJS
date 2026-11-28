@@ -179,7 +179,7 @@
 			{#each options as option (option.id)}
 				{@const active = option.id === value}
 				<MenuItem click={() => choose(option.id)}>
-					<span class={['min-w-0 flex-1 truncate', active && 'text-primary font-semibold']}
+					<span class={['min-w-0 flex-1 truncate text-left', active && 'text-primary font-semibold']}
 						>{option.name}{#if active}<span class="sr-only"> (selected)</span>{/if}</span
 					>
 					{#if active}
