@@ -8,7 +8,7 @@ import { toast } from 'svelte-sonner';
 import { v4 as uuidv4, validate as isUuid } from 'uuid';
 import { writable } from 'svelte/store';
 import type { Song, Album, Artist, SongSource, TransferredTrackMetadata } from '$lib/types';
-import UserSettings from '$lib/preferences/usersettings';
+import UserSettings, { INTERNAL_LOCATION } from '$lib/preferences/usersettings';
 import { refreshLibrary } from '$lib/global.svelte';
 import { recentlyPlayedManager } from '$lib/store';
 import { statsManager } from '$lib/stats';
@@ -149,24 +149,30 @@ export async function findDuplicateTrack(
 /**
  * Add a track another device sent. If the library already has it (see findDuplicateTrack),
  * `onDuplicate` says what to do; without it nothing is added and 'already-exists' is returned.
+ * `location` is INTERNAL_LOCATION (Maple's own storage) or the ID of a linked folder to write
+ * the file into.
  */
 export async function importTransferredTrack(
 	audio: File,
 	metadata: TransferredTrackMetadata,
 	onDuplicate?: DuplicateChoice,
+	location: string = INTERNAL_LOCATION,
 	artwork?: Blob
 ): Promise<'imported' | 'kept-both' | 'replaced' | 'already-exists'> {
 	if (!isUuid(metadata.id) || !/^[a-z0-9]{1,10}$/i.test(metadata.ext)) {
 		throw new Error('Invalid track ID or file extension.');
 	}
 
-	return OPFS.withImportLock(() => saveTransferredTrack(audio, metadata, onDuplicate, artwork));
+	return OPFS.withImportLock(() =>
+		saveTransferredTrack(audio, metadata, onDuplicate, location, artwork)
+	);
 }
 
 async function saveTransferredTrack(
 	audio: File,
 	metadata: TransferredTrackMetadata,
-	onDuplicate?: DuplicateChoice,
+	onDuplicate: DuplicateChoice | undefined,
+	location: string,
 	artwork?: Blob
 ): Promise<'imported' | 'kept-both' | 'replaced' | 'already-exists'> {
 	const tracks = await OPFS.get().tracks();
@@ -179,11 +185,14 @@ async function saveTransferredTrack(
 		: await (await fetch('/placeholder.png')).blob());
 
 	const id = tracks.some((t) => t.id === metadata.id) ? uuidv4() : metadata.id;
-	const track: Song = { ...metadata, id, image: cover, source: { kind: 'opfs' } };
-	const storedAudio = new File([audio], `track.${track.ext}`, { type: audio.type });
+	// Written into the linked folder first, so the track can point at where it landed.
+	const saved = location === INTERNAL_LOCATION ? undefined : await IFS.saveFile(location, audio);
+	const track: Song = { ...metadata, id, image: cover, source: saved?.source ?? { kind: 'opfs' } };
 
 	try {
-		await OPFS.addFile(track.id, storedAudio);
+		if (!saved) {
+			await OPFS.addFile(track.id, new File([audio], `track.${track.ext}`, { type: audio.type }));
+		}
 
 		if (!(await OPFS.addTrack(track, !!duplicate))) {
 			throw new Error('A track with this title and artist already exists.');
@@ -201,6 +210,7 @@ async function saveTransferredTrack(
 		await OPFS.addArtist({ id: uuidv4(), name: track.artist }, track.id, track.album);
 	} catch (error) {
 		await OPFS.discardImportedTrack(track).catch(() => {});
+		await saved?.remove().catch(() => {});
 		throw error;
 	}
 

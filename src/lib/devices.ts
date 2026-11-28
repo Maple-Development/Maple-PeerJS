@@ -14,6 +14,8 @@ import type { DuplicateChoice } from './library';
 import { PEER_SERVER } from './api/server';
 import DeviceMessage from './components/DeviceMessage.svelte';
 import { browser } from '$app/env';
+import { IFS } from './ifs';
+import { INTERNAL_LOCATION } from './preferences/usersettings';
 
 const OFFER_TIMEOUT_MS = 10_000;
 // How long notices stay up once there's nothing left to cancel.
@@ -708,11 +710,29 @@ export async function cancelIncoming(id: string) {
  * Keep a track once it has fully arrived: close the popup and add it to the library under the
  * sender's track ID and metadata. The cover is read from the audio file itself. If the library
  * already has the track (`duplicate` on the transfer), `onDuplicate` says whether to keep both
- * or replace the old one.
+ * or replace the old one. `location` is INTERNAL_LOCATION or the ID of a linked (external)
+ * folder to save the file into.
  */
-export async function confirmIncoming(id: string, onDuplicate?: DuplicateChoice) {
+export async function confirmIncoming(
+	id: string,
+	{ location = INTERNAL_LOCATION, onDuplicate }: { location?: string; onDuplicate?: DuplicateChoice } = {}
+) {
 	const transfer = get(incomingTransfers).find((t) => t.offer.id === id);
 	if (!transfer || !isReceived(transfer)) return;
+
+	let folderName: string | undefined;
+	if (location !== INTERNAL_LOCATION) {
+		// Asked first, while the click still counts as a user gesture. If it's refused, the popup
+		// stays open so the track can be saved somewhere else instead.
+		try {
+			folderName = (await IFS.requestWriteAccess(location)).name;
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : "Couldn't open that folder.");
+			return;
+		}
+		if (!get(incomingTransfers).some((t) => t.offer.id === id)) return; // closed meanwhile
+	}
+
 	const received = receivedFiles.get(id);
 	closeIncoming(id);
 	if (!received) {
@@ -727,17 +747,22 @@ export async function confirmIncoming(id: string, onDuplicate?: DuplicateChoice)
 		const result = await importTransferredTrack(
 			new File([audio], track.fileName, { type: audio.type }),
 			track,
-			transfer.duplicate ? onDuplicate : undefined
+			transfer.duplicate ? onDuplicate : undefined,
+			location
 		);
+		const where = folderName ? `Saved in “${folderName}”.` : undefined;
+		const detail = (text?: string) => [text, where].filter(Boolean).join(' ') || undefined;
 		if (result === 'imported') {
-			recordIncoming(transfer, 'imported', undefined, track);
-			toast.success(`Added "${track.title}" to your library.`);
+			recordIncoming(transfer, 'imported', detail(), track);
+			toast.success(`Added "${track.title}" to your library.`, { description: where });
 		} else if (result === 'replaced') {
-			recordIncoming(transfer, 'imported', 'Replaced the copy in your library.', track);
-			toast.success(`Replaced "${track.title}" in your library.`);
+			recordIncoming(transfer, 'imported', detail('Replaced the copy in your library.'), track);
+			toast.success(`Replaced "${track.title}" in your library.`, { description: where });
 		} else if (result === 'kept-both') {
-			recordIncoming(transfer, 'imported', 'Added as a second copy.', track);
-			toast.success(`Added another copy of "${track.title}" to your library.`);
+			recordIncoming(transfer, 'imported', detail('Added as a second copy.'), track);
+			toast.success(`Added another copy of "${track.title}" to your library.`, {
+				description: where
+			});
 		} else {
 			recordIncoming(transfer, 'imported', 'Already in your library.', track);
 			toast.info(`"${track.title}" is already in your library.`);

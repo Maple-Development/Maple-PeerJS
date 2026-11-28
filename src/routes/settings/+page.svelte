@@ -25,10 +25,11 @@
 	} from '$lib/theme/theme';
 	import { UserManager } from '$lib/api/UserManager';
 	import { loadSession } from '$lib/api/auth';
-	import UserSettings from '$lib/preferences/usersettings';
+	import UserSettings, { INTERNAL_LOCATION } from '$lib/preferences/usersettings';
 	import { Settings } from '$lib/preferences/fetch';
 	import AccountSecurity from '$lib/components/AccountSecurity.svelte';
 	import ThemeColorPicker from '$lib/components/ThemeColorPicker.svelte';
+	import SelectMenu from '$lib/components/SelectMenu.svelte';
 	import { OPFS } from '$lib/opfs';
 	import { IFS, type LinkedFolder } from '$lib/ifs';
 	import { createLibrary, refreshLinkedFolder, relinkFolder } from '$lib/library';
@@ -210,6 +211,20 @@
 			if (activeSection === 'library') await checkLocations($linkedFolders);
 		}
 	}
+	// Default location for tracks received from other devices. A folder that was unlinked since
+	// counts as internal storage.
+	let transferLocation = $state<string>(UserSettings.preferences.transferLocation);
+	let initialTransferLocation = $state<string>(UserSettings.preferences.transferLocation);
+	let transferLocationShown = $derived(
+		transferLocation === INTERNAL_LOCATION ||
+			$linkedFolders.some((folder) => folder.id === transferLocation)
+			? transferLocation
+			: INTERNAL_LOCATION
+	);
+	let transferLocationOptions = $derived([
+		{ id: INTERNAL_LOCATION, name: 'Internal storage' },
+		...foldersByName.map((folder) => ({ id: folder.id, name: folder.handle.name }))
+	]);
 	let saving = $state(false);
 
 	// Sync profile fields whenever SavedUser updates
@@ -313,7 +328,8 @@
 	);
 	let libraryChanges = $derived(
 		Number(jellyfinModeEnabled !== initialJellyfinModeEnabled) +
-			Number(externalLyrics !== initialExternalLyrics)
+			Number(externalLyrics !== initialExternalLyrics) +
+			Number(transferLocation !== initialTransferLocation)
 	);
 	let connectionsChanges = $derived(
 		($isLoggedIn
@@ -363,6 +379,7 @@
 		externalLyrics = initialExternalLyrics;
 		socketCommunicationEnabled = initialSocketCommunicationEnabled;
 		jellyfinModeEnabled = initialJellyfinModeEnabled;
+		transferLocation = initialTransferLocation;
 		loggingEnabled = initialLoggingEnabled;
 		developerModeEnabled = initialDeveloperModeEnabled;
 		previewTheme(initialThemeSourceColor, initialThemeDarkMode);
@@ -437,6 +454,12 @@
 				preferencesSettings.set('jellyfinMode', jellyfinModeEnabled);
 				UserSettings.preferences.jellyfinMode = jellyfinModeEnabled;
 				initialJellyfinModeEnabled = jellyfinModeEnabled;
+			}
+
+			if (transferLocation !== initialTransferLocation) {
+				preferencesSettings.set('transferLocation', transferLocation);
+				UserSettings.preferences.transferLocation = transferLocation;
+				initialTransferLocation = transferLocation;
 			}
 
 			if (p2pTransfersEnabled !== initialP2pTransfersEnabled) {
@@ -1113,6 +1136,46 @@
 							</p>
 						{/if}
 					</section>
+
+					<!-- Where received transfers go -->
+					<div
+						class="bg-surface-container-low border-outline-variant/50 overflow-hidden rounded-3xl border"
+					>
+						<div class="border-outline-variant/40 border-b px-5 py-3.5">
+							<h3 class="text-on-surface-variant text-xs font-semibold tracking-wider uppercase">
+								Transfers
+							</h3>
+						</div>
+
+						<div
+							class="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+						>
+							<div class="min-w-0 flex-1">
+								<label
+									for="transfer-location"
+									class="text-on-surface block cursor-pointer text-sm font-semibold"
+								>
+									Save received tracks to
+								</label>
+								<p
+									id="transfer-location-help"
+									class="text-on-surface-variant mt-0.5 text-xs leading-relaxed"
+								>
+									{foldersByName.length
+										? 'The default for tracks your other devices send. You can pick another location for each transfer.'
+										: 'Tracks your other devices send are kept in Maple. Link a music folder to save them there instead.'}
+								</p>
+							</div>
+							<SelectMenu
+								id="transfer-location"
+								describedby="transfer-location-help"
+								options={transferLocationOptions}
+								bind:value={() => transferLocationShown, (v) => (transferLocation = v)}
+								disabled={!foldersByName.length}
+								class="w-full shrink-0 sm:w-56"
+							/>
+						</div>
+					</div>
 
 					<!-- Import & Lyrics Preferences -->
 					<div

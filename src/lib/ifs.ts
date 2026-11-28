@@ -112,6 +112,73 @@ export class IFS {
 		if (paths.length) throw new Error('Choose the folder containing your existing tracks in their original subfolders.');
 	}
 
+	/**
+	 * Make sure Maple may write into a linked folder, asking if needed. Asking only works during
+	 * a user gesture, so call this straight from the click, before any slow work.
+	 */
+	public static async requestWriteAccess(folderId: string): Promise<FileSystemDirectoryHandle> {
+		const folder = (await this.getFolder(folderId)) as FileSystemDirectoryHandle & {
+			queryPermission?: (options: { mode: 'readwrite' }) => Promise<PermissionState>;
+			requestPermission?: (options: { mode: 'readwrite' }) => Promise<PermissionState>;
+		};
+		const mode = { mode: 'readwrite' } as const;
+		if (
+			folder.queryPermission &&
+			(await folder.queryPermission(mode)) !== 'granted' &&
+			(await folder.requestPermission?.(mode)) !== 'granted'
+		) {
+			throw new Error(`Allow Maple to save files in “${folder.name}”.`);
+		}
+		return folder;
+	}
+
+	/**
+	 * Write `file` into the top of a linked folder, under its own name or, if that's taken,
+	 * "name (2).ext" and so on. Returns where it went, plus a way to remove it again if the
+	 * import fails afterwards.
+	 */
+	public static async saveFile(
+		folderId: string,
+		file: File
+	): Promise<{ source: LinkedSource; remove: () => Promise<void> }> {
+		const folder = await this.requestWriteAccess(folderId);
+		const name = await this.freeName(folder, safeFileName(file.name));
+		const handle = await folder.getFileHandle(name, { create: true });
+		try {
+			const writable = await handle.createWritable();
+			try {
+				await writable.write(file);
+				await writable.close();
+			} catch (error) {
+				await writable.abort().catch(() => {});
+				throw error;
+			}
+		} catch (error) {
+			await folder.removeEntry(name).catch(() => {});
+			throw error;
+		}
+		return {
+			source: { kind: 'linked-folder', folderId, path: [name] },
+			remove: () => folder.removeEntry(name)
+		};
+	}
+
+	private static async freeName(folder: FileSystemDirectoryHandle, name: string): Promise<string> {
+		const dot = name.lastIndexOf('.');
+		const stem = dot > 0 ? name.slice(0, dot) : name;
+		const ext = dot > 0 ? name.slice(dot) : '';
+		for (let n = 1; ; n++) {
+			const candidate = n === 1 ? name : `${stem} (${n})${ext}`;
+			try {
+				await folder.getFileHandle(candidate);
+			} catch (error) {
+				if (error instanceof DOMException && error.name === 'NotFoundError') return candidate;
+				if (error instanceof DOMException && error.name === 'TypeMismatchError') continue;
+				throw error;
+			}
+		}
+	}
+
 	public static async openFile(source: LinkedSource): Promise<File> {
 		const handle = await this.fileAtPath(await this.getFolder(source.folderId), source.path);
 		return handle.getFile();
@@ -122,4 +189,13 @@ export class IFS {
 		this.handles.clear();
 		this.folderList.set([]);
 	}
+}
+
+/** A file name another device sent, made safe to create: no path parts or reserved characters. */
+function safeFileName(name: string): string {
+	const cleaned = name
+		.replace(/[\u0000-\u001f<>:"/\\|?*]/g, '_')
+		.replace(/^[\s.]+|[\s.]+$/g, '')
+		.slice(-180);
+	return cleaned || 'track';
 }
