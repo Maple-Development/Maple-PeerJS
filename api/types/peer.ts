@@ -21,6 +21,8 @@ export interface TransferBatch {
     count: number
     /** Bytes of this file and every file after it in the batch. */
     size: number
+    /** Set when the batch is an album's tracks: the album's name, for the receiver's prompt. */
+    album?: string
     /**
      * Sent with the first file only: every track in the batch, in order, so the receiver can
      * see what it's accepting.

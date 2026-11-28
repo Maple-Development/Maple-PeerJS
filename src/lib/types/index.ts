@@ -106,6 +106,18 @@ export type AckMessage = {
 
 export type TransferredTrackMetadata = Omit<Song, 'image' | 'source'>;
 
+/** The album a track was sent as part of ("Send to Device" on an album), minus its cover. */
+export type TransferredAlbumMetadata = Pick<Album, 'name' | 'artist' | 'year' | 'genre'>;
+
+/** An album's cover, sent with each of its tracks so the receiver's album gets the same one. */
+export type TransferredArtwork = { bytes: ArrayBuffer; type: string };
+
+/**
+ * The largest album cover sent with a track. A bigger one is left out, and the receiver reads
+ * the cover from the audio file instead.
+ */
+export const MAX_ARTWORK_BYTES = 5 * 1024 * 1024;
+
 export type StartMessage = {
 	type: 'start';
 	transferId: string;
@@ -113,6 +125,8 @@ export type StartMessage = {
 	chunkSize: number;
 	sendWindow: number;
 	track: TransferredTrackMetadata;
+	album?: TransferredAlbumMetadata;
+	artwork?: TransferredArtwork;
 };
 
 export type PeerMessage =

@@ -3,7 +3,7 @@
 	import UserSettings from '$lib/preferences/usersettings';
 	import { onMount } from 'svelte';
 	import type { Song, Playlist, Album, Artist } from '$lib/types';
-	import { playlists } from '$lib/global.svelte';
+	import { playlists, tracks } from '$lib/global.svelte';
 	import { OPFS } from '$lib/opfs';
 	import Lazy from 'svelte-lazy';
 	import { goto } from '$app/navigation';
@@ -308,6 +308,28 @@
 		if (track) tracksToSend.set({ songs: [track] });
 	}
 
+	async function handleSendAlbumToDevice() {
+		showMenu = false;
+		showPlaylistSubmenu = false;
+		if (hideSubmenuTimeout) {
+			clearTimeout(hideSubmenuTimeout);
+			hideSubmenuTimeout = null;
+		}
+		if (!album) return;
+		// The album's tracks, in album order (disc, then track number), so they arrive that way.
+		const current = (await OPFS.get().album(album.id)) ?? album;
+		const ids = new Set(current.tracks ?? []);
+		const songs = tracks()
+			.filter((song) => ids.has(song.id))
+			.sort(
+				(a, b) =>
+					(a.disk || 1) - (b.disk || 1) ||
+					(a.trackNumber || 0) - (b.trackNumber || 0) ||
+					a.title.localeCompare(b.title)
+			);
+		if (songs.length) tracksToSend.set({ songs, album: current });
+	}
+
 	function handlePlaylistHover() {
 		if (hideSubmenuTimeout) {
 			clearTimeout(hideSubmenuTimeout);
@@ -367,7 +389,8 @@
 					<span class="text-sm font-medium">Delete</span>
 				</button>
 			{/snippet}
-			{#if type !== 'track'}
+			<!-- Tracks and albums list Delete last, after what can be done with them. -->
+			{#if type !== 'track' && type !== 'album'}
 				{@render deleteItem()}
 			{/if}
 
@@ -454,6 +477,18 @@
 						</div>
 					{/if}
 				</div>
+			{/if}
+			{#if type === 'album'}
+				<button
+					onclick={handleSendAlbumToDevice}
+					class="text-on-surface hover:bg-surface-container-high flex w-full items-center px-4 py-3 text-left transition-colors duration-150"
+				>
+					<svg class="mr-3 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24">
+						<path fill="currentColor" d="M2 21q-.425 0-.712-.288T1 20t.288-.712T2 19h20q.425 0 .713.288T23 20t-.288.713T22 21zm2-3q-.825 0-1.412-.587T2 16V5q0-.825.588-1.412T4 3h16q.825 0 1.413.588T22 5v11q0 .825-.587 1.413T20 18zm0-2h16V5H4zm0 0V5z" />
+					</svg>
+					<span class="text-sm font-medium">Send to Device</span>
+				</button>
+				{@render deleteItem()}
 			{/if}
 			{#if type === 'track'}
 				<button

@@ -7,7 +7,14 @@ import { OPFS } from '$lib/opfs';
 import { toast } from 'svelte-sonner';
 import { v4 as uuidv4, validate as isUuid } from 'uuid';
 import { writable } from 'svelte/store';
-import type { Song, Album, Artist, SongSource, TransferredTrackMetadata } from '$lib/types';
+import type {
+	Song,
+	Album,
+	Artist,
+	SongSource,
+	TransferredAlbumMetadata,
+	TransferredTrackMetadata
+} from '$lib/types';
 import UserSettings, { INTERNAL_LOCATION } from '$lib/preferences/usersettings';
 import { refreshLibrary } from '$lib/global.svelte';
 import { recentlyPlayedManager } from '$lib/store';
@@ -150,21 +157,24 @@ export async function findDuplicateTrack(
  * Add a track another device sent. If the library already has it (see findDuplicateTrack),
  * `onDuplicate` says what to do; without it nothing is added and 'already-exists' is returned.
  * `location` is INTERNAL_LOCATION (Maple's own storage) or the ID of a linked folder to write
- * the file into.
+ * the file into. When the track was sent as part of an album, `album` is that album's metadata
+ * and `artwork` its cover: the track is filed under it, and a new album gets that cover rather
+ * than the one embedded in the file.
  */
 export async function importTransferredTrack(
 	audio: File,
 	metadata: TransferredTrackMetadata,
 	onDuplicate?: DuplicateChoice,
 	location: string = INTERNAL_LOCATION,
-	artwork?: Blob
+	artwork?: Blob,
+	album?: TransferredAlbumMetadata
 ): Promise<'imported' | 'kept-both' | 'replaced' | 'already-exists'> {
 	if (!isUuid(metadata.id) || !/^[a-z0-9]{1,10}$/i.test(metadata.ext)) {
 		throw new Error('Invalid track ID or file extension.');
 	}
 
 	return OPFS.withImportLock(() =>
-		saveTransferredTrack(audio, metadata, onDuplicate, location, artwork)
+		saveTransferredTrack(audio, metadata, onDuplicate, location, artwork, album)
 	);
 }
 
@@ -173,7 +183,8 @@ async function saveTransferredTrack(
 	metadata: TransferredTrackMetadata,
 	onDuplicate: DuplicateChoice | undefined,
 	location: string,
-	artwork?: Blob
+	artwork?: Blob,
+	album?: TransferredAlbumMetadata
 ): Promise<'imported' | 'kept-both' | 'replaced' | 'already-exists'> {
 	const tracks = await OPFS.get().tracks();
 	const duplicate = findDuplicate(tracks, metadata);
@@ -187,7 +198,13 @@ async function saveTransferredTrack(
 	const id = tracks.some((t) => t.id === metadata.id) ? uuidv4() : metadata.id;
 	// Written into the linked folder first, so the track can point at where it landed.
 	const saved = location === INTERNAL_LOCATION ? undefined : await IFS.saveFile(location, audio);
-	const track: Song = { ...metadata, id, image: cover, source: saved?.source ?? { kind: 'opfs' } };
+	const track: Song = {
+		...metadata,
+		...(album ? { album: album.name } : {}),
+		id,
+		image: cover,
+		source: saved?.source ?? { kind: 'opfs' }
+	};
 
 	try {
 		if (!saved) {
@@ -201,9 +218,9 @@ async function saveTransferredTrack(
 		await OPFS.addAlbum({
 			id: uuidv4(),
 			name: track.album,
-			artist: track.artist,
-			year: track.year,
-			genre: track.genre,
+			artist: album?.artist ?? track.artist,
+			year: album?.year ?? track.year,
+			genre: album ? album.genre : track.genre,
 			image: cover
 		}, track.id);
 
