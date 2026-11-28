@@ -414,9 +414,12 @@
 										viewBox="0 0 24 24"
 										aria-hidden="true"
 									>
+										<!-- Material-style icons: a phone (camera and side button) or a laptop. -->
 										<path
 											fill="currentColor"
-											d="M7 23q-.825 0-1.412-.587T5 21V3q0-.825.588-1.412T7 1h10q.825 0 1.413.588T19 3v18q0 .825-.587 1.413T17 23zm0-5v3h10v-3zm0-2h10V6H7z"
+											d={device.kind === 'mobile'
+												? 'M6 23q-.425 0-.712-.288T5 22V2q0-.425.288-.712T6 1h12q.425 0 .713.288T19 2v20q0 .425-.288.713T18 23zm1-2h10V3H7zm5-15q.425 0 .713-.288T13 5t-.288-.712T12 4t-.712.288T11 5t.288.713T12 6m7 5V6h1v5z'
+												: 'M2 21q-.425 0-.712-.288T1 20t.288-.712T2 19h20q.425 0 .713.288T23 20t-.288.713T22 21zm3-3q-.825 0-1.412-.587T3 16V5q0-.825.588-1.412T5 3h14q.825 0 1.413.588T21 5v11q0 .825-.587 1.413T19 18zm0-2h14V5H5z'}
 										/>
 									</svg>
 									<span class="truncate" title={device.name}>{device.name}</span>

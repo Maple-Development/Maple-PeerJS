@@ -75,7 +75,7 @@ export class PeerManager {
 				return;
 			}
 
-			const { id, name } = parsed.data;
+			const { id, name, kind } = parsed.data;
 
 			if (registeredDeviceId !== undefined && registeredDeviceId !== id) {
 				return;
@@ -90,13 +90,14 @@ export class PeerManager {
 			let entry = accountDevices.get(id);
 			if (!entry) {
 				entry = {
-					device: { id, name },
+					device: { id, name, kind },
 					socketIds: new Set()
 				};
 
 				accountDevices.set(id, entry);
 			} else if (registeredDeviceId === id) {
 				entry.device.name = name;
+				entry.device.kind = kind;
 			}
 
 			entry.socketIds.add(client.id);

@@ -1,6 +1,10 @@
+/** mobile: a phone or tablet. desktop: anything else, such as a laptop. */
+export type DeviceKind = 'mobile' | 'desktop';
+
 export interface OwnDevice {
     id: string;
     name: string;
+    kind: DeviceKind;
 }
 
 export interface TransferFile {
@@ -48,6 +52,7 @@ export interface TransferEnded {
 export interface DeviceRegistration {
 	id: string;
 	name: string;
+	kind: DeviceKind;
 }
 
 export type TransferReply = | { ok: true; transferId: string } | { ok: false; error: string};

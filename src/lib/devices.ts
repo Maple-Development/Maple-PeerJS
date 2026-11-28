@@ -2,6 +2,7 @@ import { writable, get } from 'svelte/store';
 import { toast } from 'svelte-sonner';
 import { v4 as uuidv4 } from 'uuid';
 import type {
+	DeviceKind,
 	OwnDevice,
 	TransferEnded,
 	TransferFile,
@@ -181,6 +182,16 @@ function defaultName(): string {
 	return os ? `${browser} on ${os}` : browser;
 }
 
+/** Whether this browser runs on a phone or tablet, for the icon other devices show for it. */
+function deviceKind(): DeviceKind {
+	const hint = (navigator as Navigator & { userAgentData?: { mobile: boolean } }).userAgentData;
+	if (hint?.mobile) return 'mobile';
+	const ua = navigator.userAgent;
+	// iPadOS reports itself as a Mac; a touch screen gives it away.
+	const iPad = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+	return iPad || /Android|iPhone|iPad|iPod|Mobile/.test(ua) ? 'mobile' : 'desktop';
+}
+
 function currentName(): string {
 	return localStorage.getItem(NAME_KEY)?.trim() || defaultName();
 }
@@ -194,7 +205,7 @@ export function watchDevices(client: MapleSocket) {
 	});
 
 	client.on('connect', async () => {
-		client.emit('peer:register', { id: await idPromise, name: currentName() });
+		client.emit('peer:register', { id: await idPromise, name: currentName(), kind: deviceKind() });
 	});
 
 	client.on('peer:devices', (list) => {
@@ -734,5 +745,5 @@ export function renameSelf(name: string) {
 	const id = get(selfId);
 	if (!trimmed || trimmed.length > MAX_NAME || !id) return;
 	localStorage.setItem(NAME_KEY, trimmed);
-	socket?.emit('peer:register', { id, name: trimmed });
+	socket?.emit('peer:register', { id, name: trimmed, kind: deviceKind() });
 }
