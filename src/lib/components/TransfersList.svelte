@@ -92,15 +92,14 @@
 					{#each section.entries as entry (entry.id)}
 						{@const text = outcomeText(entry)}
 						<div class="bg-surface-container-low min-w-0 rounded-2xl px-4 py-3 opacity-80">
-							<p class="text-on-surface truncate text-sm font-semibold" title={entry.title}>
+							<p class="text-on-surface text-sm font-semibold wrap-anywhere">
 								{entry.title}
 							</p>
 							<p
 								class={[
-									'truncate text-xs',
+									'mt-0.5 text-xs wrap-anywhere',
 									entry.outcome === 'failed' ? 'text-error' : 'text-on-surface-variant'
 								]}
-								title={text}
 							>
 								{entry.peer}{text ? ` · ${text}` : ''} · {timeOf(entry.endedAt)}
 							</p>
