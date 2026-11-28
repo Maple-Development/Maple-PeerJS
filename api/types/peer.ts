@@ -23,6 +23,8 @@ export interface TransferBatch {
     size: number
     /** Set when the batch is an album's tracks: the album's name, for the receiver's prompt. */
     album?: string
+    /** Set when the batch is a playlist's tracks: the playlist's name, for the receiver's prompt. */
+    playlist?: string
     /**
      * Sent with the first file only: every track in the batch, in order, so the receiver can
      * see what it's accepting.

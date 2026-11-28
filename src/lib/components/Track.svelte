@@ -330,6 +330,21 @@
 		if (songs.length) tracksToSend.set({ songs, album: current });
 	}
 
+	async function handleSendPlaylistToDevice() {
+		showMenu = false;
+		showPlaylistSubmenu = false;
+		if (hideSubmenuTimeout) {
+			clearTimeout(hideSubmenuTimeout);
+			hideSubmenuTimeout = null;
+		}
+		if (!playlist) return;
+		// The playlist's tracks in its own order, so the other device's playlist matches.
+		const current = (await OPFS.get().playlist(playlist.id)) ?? playlist;
+		const byId = new Map(tracks().map((song) => [song.id, song]));
+		const songs = [...new Set(current.tracks ?? [])].flatMap((id) => byId.get(id) ?? []);
+		if (songs.length) tracksToSend.set({ songs, playlist: current });
+	}
+
 	function handlePlaylistHover() {
 		if (hideSubmenuTimeout) {
 			clearTimeout(hideSubmenuTimeout);
@@ -389,8 +404,8 @@
 					<span class="text-sm font-medium">Delete</span>
 				</button>
 			{/snippet}
-			<!-- Tracks and albums list Delete last, after what can be done with them. -->
-			{#if type !== 'track' && type !== 'album'}
+			<!-- Tracks, albums and playlists list Delete last, after what can be done with them. -->
+			{#if type !== 'track' && type !== 'album' && type !== 'playlist'}
 				{@render deleteItem()}
 			{/if}
 
@@ -413,6 +428,16 @@
 					</svg>
 					<span class="text-sm font-medium">Duplicate</span>
 				</button>
+				<button
+					onclick={handleSendPlaylistToDevice}
+					class="text-on-surface hover:bg-surface-container-high flex w-full items-center px-4 py-3 text-left transition-colors duration-150"
+				>
+					<svg class="mr-3 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24">
+						<path fill="currentColor" d="M2 21q-.425 0-.712-.288T1 20t.288-.712T2 19h20q.425 0 .713.288T23 20t-.288.713T22 21zm2-3q-.825 0-1.412-.587T2 16V5q0-.825.588-1.412T4 3h16q.825 0 1.413.588T22 5v11q0 .825-.587 1.413T20 18zm0-2h16V5H4zm0 0V5z" />
+					</svg>
+					<span class="text-sm font-medium">Send to Device</span>
+				</button>
+				{@render deleteItem()}
 			{/if}
 
 			{#if type === 'track' || type === 'album'}

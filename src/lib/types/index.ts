@@ -113,6 +113,18 @@ export type TransferredAlbumMetadata = Pick<Album, 'name' | 'artist' | 'year' | 
 export type TransferredArtwork = { bytes: ArrayBuffer; type: string };
 
 /**
+ * The playlist a track was sent as part of ("Send to Device" on a playlist), minus its cover and
+ * tracks: the receiver's copy gets the same name, description and created and modified dates.
+ */
+export type TransferredPlaylistMetadata = Pick<
+	Playlist,
+	'name' | 'description' | 'createdAt' | 'modifiedAt'
+>;
+
+/** The longest playlist description sent with its tracks; a longer one is cut short. */
+export const MAX_PLAYLIST_DESCRIPTION = 2000;
+
+/**
  * The largest album cover sent with a track. A bigger one is left out, and the receiver reads
  * the cover from the audio file instead.
  */
@@ -127,6 +139,9 @@ export type StartMessage = {
 	track: TransferredTrackMetadata;
 	album?: TransferredAlbumMetadata;
 	artwork?: TransferredArtwork;
+	playlist?: TransferredPlaylistMetadata;
+	/** The playlist's cover: sent until one of its tracks has arrived, not with every track. */
+	playlistArtwork?: TransferredArtwork;
 };
 
 export type PeerMessage =

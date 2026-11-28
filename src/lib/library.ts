@@ -11,8 +11,10 @@ import type {
 	Song,
 	Album,
 	Artist,
+	Playlist,
 	SongSource,
 	TransferredAlbumMetadata,
+	TransferredPlaylistMetadata,
 	TransferredTrackMetadata
 } from '$lib/types';
 import UserSettings, { INTERNAL_LOCATION } from '$lib/preferences/usersettings';
@@ -159,8 +161,14 @@ export async function findDuplicateTrack(
  * `location` is INTERNAL_LOCATION (Maple's own storage) or the ID of a linked folder to write
  * the file into. When the track was sent as part of an album, `album` is that album's metadata
  * and `artwork` its cover: the track is filed under it, and a new album gets that cover rather
- * than the one embedded in the file.
+ * than the one embedded in the file. Resolves with what happened and the ID the track has in
+ * this library: the one it was added under, or for 'already-exists' the copy already there.
  */
+export interface TransferredTrackResult {
+	result: 'imported' | 'kept-both' | 'replaced' | 'already-exists';
+	id: string;
+}
+
 export async function importTransferredTrack(
 	audio: File,
 	metadata: TransferredTrackMetadata,
@@ -168,7 +176,7 @@ export async function importTransferredTrack(
 	location: string = INTERNAL_LOCATION,
 	artwork?: Blob,
 	album?: TransferredAlbumMetadata
-): Promise<'imported' | 'kept-both' | 'replaced' | 'already-exists'> {
+): Promise<TransferredTrackResult> {
 	if (!isUuid(metadata.id) || !/^[a-z0-9]{1,10}$/i.test(metadata.ext)) {
 		throw new Error('Invalid track ID or file extension.');
 	}
@@ -185,10 +193,10 @@ async function saveTransferredTrack(
 	location: string,
 	artwork?: Blob,
 	album?: TransferredAlbumMetadata
-): Promise<'imported' | 'kept-both' | 'replaced' | 'already-exists'> {
+): Promise<TransferredTrackResult> {
 	const tracks = await OPFS.get().tracks();
 	const duplicate = findDuplicate(tracks, metadata);
-	if (duplicate && !onDuplicate) return 'already-exists';
+	if (duplicate && !onDuplicate) return { result: 'already-exists', id: duplicate.id };
 
 	const picture = artwork ? undefined : (await parseMetadataFast(audio))?.common.picture?.[0];
 	const cover = artwork ?? (picture
@@ -243,8 +251,41 @@ async function saveTransferredTrack(
 		}
 	}
 	await refreshLibrary();
-	if (!duplicate) return 'imported';
-	return onDuplicate === 'replace' ? 'replaced' : 'kept-both';
+	if (!duplicate) return { result: 'imported', id: track.id };
+	return { result: onDuplicate === 'replace' ? 'replaced' : 'kept-both', id: track.id };
+}
+
+/**
+ * Add a playlist another device sent ("Send to Device" on a playlist), once its tracks are in
+ * the library: `trackIds` are their IDs here, in the playlist's order. It keeps the sender's
+ * name, description and dates (any date it lacks, or one in the future, is now). Without a
+ * cover it gets the placeholder, as a new playlist does. Resolves with the new playlist's ID.
+ */
+export async function importTransferredPlaylist(
+	metadata: TransferredPlaylistMetadata,
+	trackIds: string[],
+	artwork?: Blob
+): Promise<string> {
+	const id = uuidv4();
+	await OPFS.withImportLock(async () => {
+		// Only tracks still in the library: one could have been replaced or removed meanwhile.
+		const present = new Set((await OPFS.get().tracks()).map((t) => t.id));
+		const now = Date.now();
+		const createdAt = Math.min(metadata.createdAt ?? now, now);
+		const modifiedAt = Math.max(createdAt, Math.min(metadata.modifiedAt ?? createdAt, now));
+		const playlist: Playlist = {
+			id,
+			name: metadata.name.trim() || 'Untitled playlist',
+			description: metadata.description,
+			tracks: [...new Set(trackIds)].filter((t) => present.has(t)),
+			image: artwork ?? (await (await fetch('/placeholder.png')).blob()),
+			createdAt,
+			modifiedAt
+		};
+		await OPFS.addPlaylist(playlist);
+	});
+	await refreshLibrary();
+	return id;
 }
 
 type LibraryFile = { file: File; source: SongSource } | { handle: FileSystemFileHandle; source: SongSource };

@@ -81,8 +81,8 @@
 			</svg>
 		</div>
 		<div class="min-w-0 flex-1">
-			<p class="text-on-surface truncate text-sm font-semibold">{title}</p>
-			<p class="text-on-surface-variant truncate text-xs">{@render details()}</p>
+			<p class="text-on-surface text-sm font-semibold [overflow-wrap:anywhere]">{title}</p>
+			<p class="text-on-surface-variant text-xs [overflow-wrap:anywhere]">{@render details()}</p>
 		</div>
 		{#if tracks?.length}
 			<span class="text-on-surface-variant flex shrink-0 items-center gap-0.5 text-xs font-medium">
@@ -124,10 +124,10 @@
 							(track.status === 'waiting' || track.status === 'unreadable') && 'opacity-60'
 						]}
 					>
-						<span class="text-on-surface block truncate text-xs font-semibold" title={track.title}
+						<span class="text-on-surface block text-xs font-semibold [overflow-wrap:anywhere]"
 							>{track.title || 'Untitled'}</span
 						>
-						<span class="text-on-surface-variant block truncate text-[11px]"
+						<span class="text-on-surface-variant block text-[11px] [overflow-wrap:anywhere]"
 							>{track.artist || 'Unknown artist'}</span
 						>
 					</span>

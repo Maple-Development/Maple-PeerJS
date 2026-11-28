@@ -35,8 +35,10 @@
 		isOver,
 		isReceived,
 		isSent,
+		openPlaylist,
 		outgoingBatch,
 		outgoingOffers,
+		playlistToSend,
 		renameSelf,
 		selfId,
 		sendBatch,
@@ -155,9 +157,13 @@
 	// Picking a device to send tracks to. A transfer that needs the popup goes first: an
 	// offer that arrives mid-pick is answered, then the picker comes back.
 	let picking = $derived(!current && !batchIn && !showBatchOut && !!$tracksToSend);
-	/** The tracks being picked for, and the album they are when it's an album being sent. */
+	/**
+	 * The tracks being picked for, and the album or playlist they are when it's one of those
+	 * being sent.
+	 */
 	let songs = $derived($tracksToSend?.songs ?? []);
 	let pickedAlbum = $derived($tracksToSend?.album);
+	let pickedPlaylist = $derived($tracksToSend?.playlist);
 
 	// Writable so the dialog can close itself; it reopens whenever another transfer is queued.
 	let open = $derived(!!current || picking || !!batchIn || showBatchOut);
@@ -237,7 +243,9 @@
 				: picking
 					? pickedAlbum
 						? 'Send album'
-						: songs.length > 1
+						: pickedPlaylist
+							? 'Send playlist'
+							: songs.length > 1
 							? 'Send tracks'
 							: 'Send track'
 					: !current
@@ -370,10 +378,11 @@
 	let draftName = $state('');
 
 	// Start each pick fresh, and load the tracks' files (their size is shown, and they're what
-	// gets sent) and, for one track or an album, its artwork.
+	// gets sent) and, for one track, an album or a playlist, its artwork.
 	$effect(() => {
 		const picked = $tracksToSend?.songs ?? [];
 		const pickedAlbumNow = $tracksToSend?.album;
+		const pickedPlaylistNow = $tracksToSend?.playlist;
 		pickedId = null;
 		songFiles = undefined;
 		artwork = undefined;
@@ -392,8 +401,9 @@
 		).then((files) => {
 			if (!stale) songFiles = files;
 		});
-		const image = pickedAlbumNow ? pickedAlbumNow.image : picked[0].image;
-		if (picked.length > 1 && !pickedAlbumNow) {
+		const collection = pickedAlbumNow ?? pickedPlaylistNow;
+		const image = collection ? collection.image : picked[0].image;
+		if (picked.length > 1 && !collection) {
 			return () => {
 				stale = true;
 			};
@@ -430,8 +440,12 @@
 		if (!items.length) return;
 		sending = true;
 		sendError = undefined;
-		// An album's metadata and cover go with each of its tracks.
-		const album = picked.album ? await albumToSend(picked.album) : undefined;
+		// An album's metadata and cover go with each of its tracks; so do a playlist's, for the
+		// other device to make the playlist from them.
+		const collection = {
+			album: picked.album ? await albumToSend(picked.album) : undefined,
+			playlist: picked.playlist ? await playlistToSend(picked.playlist) : undefined
+		};
 		// The files go with the offer; devices.ts sends them once the other device accepts.
 		const reply =
 			items.length === 1
@@ -442,9 +456,9 @@
 						items[0].song,
 						items[0].label,
 						undefined,
-						album
+						collection
 					)
-				: await sendBatch(to, items, picked.songs.length - items.length, album);
+				: await sendBatch(to, items, picked.songs.length - items.length, collection);
 		sending = false;
 		// From here a "waiting" notice takes over until the other device answers.
 		if (reply.ok) {
@@ -518,6 +532,15 @@
 		else closeOutgoing(current.id);
 	}
 
+	/**
+	 * Close a received playlist's batch and go to the playlist. Takes the ID as an argument: a
+	 * {@const} in the markup is read lazily, and close() takes away the batch it comes from.
+	 */
+	function openReceivedPlaylist(playlistId: string) {
+		close();
+		void openPlaylist(playlistId);
+	}
+
 	function cancel(id: string) {
 		if (incoming) void cancelIncoming(id);
 		else void cancelOutgoing(id);
@@ -572,19 +595,23 @@
 						device={batch.sender.name}
 						after={batch.album
 							? ` wants to send you the album “${batch.album}” (${batch.count} tracks).`
-							: ` wants to send you ${batch.count} tracks.`}
+							: batch.playlist
+								? ` wants to send you the playlist “${batch.playlist}” (${batch.count} tracks).`
+								: ` wants to send you ${batch.count} tracks.`}
 					/>
 				</p>
 			{/if}
 
 			{#snippet batchInDetails()}
-				{#if batch.album}{batch.count} tracks · {/if}{formatSize(batch.size)}{#if !answering}<DeviceMessage
+				{batch.album || batch.playlist ? `${batch.count} tracks · ` : ''}{formatSize(
+					batch.size
+				)}{#if !answering}<DeviceMessage
 						before=" from "
 						device={batch.sender.name}
 					/>{/if}
 			{/snippet}
 			<BatchTracks
-				title={batch.album ?? `${batch.count} tracks`}
+				title={batch.album ?? batch.playlist ?? `${batch.count} tracks`}
 				details={batchInDetails}
 				tracks={batchInRows}
 			/>
@@ -635,9 +662,18 @@
 			{#if !answering && summary}
 				<p class="text-on-surface-variant text-sm">{summary}.</p>
 			{/if}
+			{#if batch.playlistId}
+				<p class="text-on-surface-variant text-sm">
+					They're in the playlist <span class="text-on-surface font-semibold"
+						>{batch.playlist}</span
+					>.
+				</p>
+			{/if}
 			{#if batch.status === 'receiving'}
 				<p class="text-on-surface-variant text-xs">
-					Canceling stops the rest. Tracks already added stay in your library.
+					{batch.playlist
+						? 'Canceling stops the rest. Tracks already added stay in your library, and go in the playlist.'
+						: 'Canceling stops the rest. Tracks already added stay in your library.'}
 				</p>
 			{:else if batch.status === 'cancelled'}
 				<p class="text-on-surface-variant">{batch.error}</p>
@@ -650,13 +686,17 @@
 		{@const summary = outgoingSummary(batch)}
 		<div class="flex w-80 max-w-full flex-col gap-4">
 			{#snippet batchOutDetails()}
-				{#if batch.album}{batch.items.length} tracks · {/if}{formatSize(batchOutSize)}<DeviceMessage
+				{batch.album || batch.playlist ? `${batch.items.length} tracks · ` : ''}{formatSize(
+					batchOutSize
+				)}<DeviceMessage
 					before=" to "
 					device={batch.target.name}
 				/>
 			{/snippet}
 			<BatchTracks
-				title={batch.album?.metadata.name ?? `${batch.items.length} tracks`}
+				title={batch.album?.metadata.name ??
+					batch.playlist?.metadata.name ??
+					`${batch.items.length} tracks`}
 				details={batchOutDetails}
 				tracks={batchOutRows}
 			/>
@@ -666,7 +706,7 @@
 				<div class="flex flex-col gap-2">
 					<LinearProgress percent={batchOutSize > 0 ? (batchOutBytes / batchOutSize) * 100 : 0} />
 					<div class="text-on-surface-variant flex justify-between gap-3 text-xs">
-						<span class="min-w-0 truncate" title={item?.label}
+						<span class="min-w-0 [overflow-wrap:anywhere]"
 							><DeviceMessage
 								before="Sending {batch.index + 1} of {batch.items.length} to "
 								device={batch.target.name}
@@ -764,6 +804,12 @@
 					{songs.length === 1 ? 'track' : 'tracks'}{songFiles ? ` · ${formatSize(pickedSize)}` : ''}
 				{/snippet}
 				{@render trackCard(pickedAlbum.name || 'Untitled album', artwork, albumDetails)}
+			{:else if pickedPlaylist}
+				{#snippet playlistDetails()}
+					Playlist · {songs.length}
+					{songs.length === 1 ? 'track' : 'tracks'}{songFiles ? ` · ${formatSize(pickedSize)}` : ''}
+				{/snippet}
+				{@render trackCard(pickedPlaylist.name || 'Untitled playlist', artwork, playlistDetails)}
 			{:else if multi}
 				{@const artists = new Set(songs.map((s) => s.artist || 'Unknown artist'))}
 				{#snippet tracksDetails()}
@@ -805,7 +851,7 @@
 								title="Rename this device"
 								class="hover:text-on-surface inline-flex min-w-0 cursor-pointer items-center gap-1 rounded-full px-1 py-0.5 transition-colors"
 							>
-								<span class="truncate"
+								<span class="min-w-0 text-left [overflow-wrap:anywhere]"
 									><DeviceMessage before="Sending from " device={self.name} /></span
 								>
 								<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" aria-hidden="true">
@@ -827,7 +873,7 @@
 									aria-pressed={active}
 									onclick={() => (pickedId = device.id)}
 									class={[
-										'inline-flex max-w-full cursor-pointer items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors',
+										'inline-flex max-w-full cursor-pointer items-center gap-1.5 rounded-2xl border px-3 py-1.5 text-xs font-semibold transition-colors',
 										active
 											? 'bg-secondary-container text-on-secondary-container border-primary/40'
 											: 'bg-surface-container text-on-surface-variant hover:text-on-surface border-transparent'
@@ -845,7 +891,7 @@
 											d="M7 23q-.825 0-1.412-.587T5 21V3q0-.825.588-1.412T7 1h10q.825 0 1.413.588T19 3v18q0 .825-.587 1.413T17 23zm0-5v3h10v-3zm0-2h10V6H7z"
 										/>
 									</svg>
-									<span class="truncate" title={device.name}>{device.name}</span>
+									<span class="min-w-0 text-left [overflow-wrap:anywhere]">{device.name}</span>
 								</button>
 							{/each}
 						</div>
@@ -888,6 +934,13 @@
 					>{batchIn.cancelling ? 'Canceling…' : 'Cancel'}</Button
 				>
 			{:else}
+				{@const playlistId = batchIn.playlistId}
+				{#if playlistId}
+					<Button
+						variant="tonal"
+						onclick={() => openReceivedPlaylist(playlistId)}>Open playlist</Button
+					>
+				{/if}
 				<Button variant={batchIn.status === 'done' ? 'filled' : 'text'} onclick={close}
 					>{batchIn.status === 'done' ? 'Done' : 'Close'}</Button
 				>
@@ -980,8 +1033,8 @@
 			</div>
 		{/if}
 		<div class="min-w-0 flex-1">
-			<p class="text-on-surface truncate text-sm font-semibold" {title}>{title}</p>
-			<p class="text-on-surface-variant truncate text-xs">{@render details()}</p>
+			<p class="text-on-surface text-sm font-semibold [overflow-wrap:anywhere]">{title}</p>
+			<p class="text-on-surface-variant text-xs [overflow-wrap:anywhere]">{@render details()}</p>
 		</div>
 	</div>
 {/snippet}
