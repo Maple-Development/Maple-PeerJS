@@ -12,21 +12,23 @@
 	 * (TransferDialog.svelte) and only shows up here once it's over.
 	 */
 
-	const OUTCOME_LABEL: Record<TransferOutcome, string> = {
-		sent: 'Done',
-		imported: 'Done',
-		discarded: 'Discarded',
-		declined: 'Declined',
-		expired: 'Expired',
-		cancelled: 'Canceled',
-		failed: 'Failed'
-	};
+	/**
+	 * Each section lists the transfers that ended one of these ways. Declined covers every way
+	 * the track was turned away without anyone stopping a transfer under way.
+	 */
+	const SECTIONS: { title: string; outcomes: TransferOutcome[] }[] = [
+		{ title: 'Completed', outcomes: ['sent', 'imported'] },
+		{ title: 'Declined', outcomes: ['declined', 'expired', 'discarded'] },
+		{ title: 'Canceled', outcomes: ['cancelled'] },
+		{ title: 'Failed', outcomes: ['failed'] }
+	];
 
-	function outcomeTone(outcome: TransferOutcome) {
-		if (outcome === 'sent' || outcome === 'imported') return 'bg-primary/15 text-primary';
-		if (outcome === 'failed') return 'bg-error-container text-on-error-container';
-		return 'bg-surface-container-highest text-on-surface-variant';
-	}
+	let sections = $derived(
+		SECTIONS.map((section) => ({
+			...section,
+			entries: $transferHistory.filter((entry) => section.outcomes.includes(entry.outcome))
+		})).filter((section) => section.entries.length > 0)
+	);
 
 	/** What happened, in a few words. */
 	function outcomeText(entry: FinishedTransfer) {
@@ -70,47 +72,42 @@
 	</div>
 {:else}
 	<!-- Ended this session (kept in memory until reload or Clear) -->
-	<section aria-label="Completed transfers" class="flex flex-col gap-3">
-		<div class="flex items-center justify-between">
-			<h2 class="text-on-surface-variant text-sm font-semibold">Completed</h2>
-			<button
-				type="button"
-				onclick={clearTransferHistory}
-				class="text-on-surface-variant hover:text-on-surface cursor-pointer border-none bg-transparent text-xs font-medium transition-colors"
-			>
-				Clear
-			</button>
-		</div>
-		<div class="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-			{#each $transferHistory as entry (entry.id)}
-				{@const text = outcomeText(entry)}
-				<div
-					class="bg-surface-container-low flex items-center justify-between gap-3 rounded-2xl px-4 py-3 opacity-80"
-				>
-					<div class="min-w-0">
-						<p class="text-on-surface truncate text-sm font-semibold" title={entry.title}>
-							{entry.title}
-						</p>
-						<p
-							class={[
-								'truncate text-xs',
-								entry.outcome === 'failed' ? 'text-error' : 'text-on-surface-variant'
-							]}
-							title={text}
+	<div class="flex flex-col gap-6">
+		{#each sections as section, i (section.title)}
+			<section aria-label="{section.title} transfers" class="flex flex-col gap-3">
+				<div class="flex items-center justify-between">
+					<h2 class="text-on-surface-variant text-sm font-semibold">{section.title}</h2>
+					<!-- One Clear for the whole list, beside the first heading. -->
+					{#if i === 0}
+						<button
+							type="button"
+							onclick={clearTransferHistory}
+							class="text-on-surface-variant hover:text-on-surface cursor-pointer border-none bg-transparent text-xs font-medium transition-colors"
 						>
-							{entry.peer}{text ? ` · ${text}` : ''} · {timeOf(entry.endedAt)}
-						</p>
-					</div>
-					<span
-						class={[
-							'shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-semibold',
-							outcomeTone(entry.outcome)
-						]}
-					>
-						{OUTCOME_LABEL[entry.outcome]}
-					</span>
+							Clear
+						</button>
+					{/if}
 				</div>
-			{/each}
-		</div>
-	</section>
+				<div class="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+					{#each section.entries as entry (entry.id)}
+						{@const text = outcomeText(entry)}
+						<div class="bg-surface-container-low min-w-0 rounded-2xl px-4 py-3 opacity-80">
+							<p class="text-on-surface truncate text-sm font-semibold" title={entry.title}>
+								{entry.title}
+							</p>
+							<p
+								class={[
+									'truncate text-xs',
+									entry.outcome === 'failed' ? 'text-error' : 'text-on-surface-variant'
+								]}
+								title={text}
+							>
+								{entry.peer}{text ? ` · ${text}` : ''} · {timeOf(entry.endedAt)}
+							</p>
+						</div>
+					{/each}
+				</div>
+			</section>
+		{/each}
+	</div>
 {/if}
