@@ -373,9 +373,14 @@ export class OPFS {
 		await this.pruneEmptyCollections();
 	}
 
-	public static async addTrack(track: Song): Promise<boolean> {
+	/**
+	 * Add a track's library entry. Returns false, adding nothing, if Maple already stores a track
+	 * with the same title and artist, unless `allowDuplicate` is set.
+	 */
+	public static async addTrack(track: Song, allowDuplicate = false): Promise<boolean> {
 		const tracks = await this.readTracksCache();
 		if (
+			!allowDuplicate &&
 			track.source?.kind !== 'linked-folder' &&
 			this.hasManagedTrack(tracks, track.title, track.artist)
 		) {
@@ -393,6 +398,22 @@ export class OPFS {
 		tracks.push(trackWithImagePath);
 		await this.writeTracksCache(tracks);
 		return true;
+	}
+
+	/**
+	 * Swap `old` for the track `replacementId` (already in the library): the replacement takes
+	 * `old`'s place in every playlist, then `old` is deleted.
+	 */
+	public static async replaceTrack(old: Song, replacementId: string): Promise<void> {
+		for (const playlist of await this.get().playlists()) {
+			const index = playlist.tracks?.indexOf(old.id) ?? -1;
+			if (index === -1 || !playlist.tracks) continue;
+			if (playlist.tracks.includes(replacementId)) playlist.tracks.splice(index, 1);
+			else playlist.tracks[index] = replacementId;
+			await this.playlist().edit(playlist);
+		}
+		await this.track().delete(old);
+		await this.pruneEmptyCollections();
 	}
 
 	public static async getSong(track: Song) {

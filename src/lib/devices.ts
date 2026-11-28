@@ -10,6 +10,7 @@ import type {
 } from '$shared/types/peer';
 import type { DataConnection, Peer } from 'peerjs';
 import type { MapleSocket, Song, TransferredTrackMetadata } from './types';
+import type { DuplicateChoice } from './library';
 import { PEER_SERVER } from './api/server';
 import DeviceMessage from './components/DeviceMessage.svelte';
 import { browser } from '$app/env';
@@ -52,6 +53,12 @@ export interface IncomingTransfer {
 	completed?: boolean;
 	/** This device asked the server to cancel and is waiting for it to confirm. */
 	cancelling?: boolean;
+	/**
+	 * Once the file has arrived: the track already in this library that it duplicates (same ID,
+	 * or same title and artist), whether Maple stores it or it is in a linked folder (`linked`).
+	 * The user then picks what to do with it.
+	 */
+	duplicate?: { title: string; artist: string; linked: boolean };
 	error?: string;
 }
 
@@ -612,6 +619,24 @@ async function startReceiving(offer: TransferOffer) {
 		}
 		if (peers.get(id) !== opening) return; // ended meanwhile
 
+		// Look for a copy already in the library now, so the popup can ask what to do with it.
+		// Importing checks again, in case the library changed meanwhile.
+		try {
+			const { findDuplicateTrack } = await import('./library');
+			const existing = await findDuplicateTrack(track);
+			if (existing) {
+				const duplicate = {
+					title: existing.title,
+					artist: existing.artist,
+					linked: existing.source?.kind === 'linked-folder'
+				};
+				updateIncoming(id, (t) => ({ ...t, duplicate }));
+			}
+		} catch {
+			// Not knowing just means the popup doesn't ask; importing still won't overwrite it.
+		}
+		if (peers.get(id) !== opening) return;
+
 		// The transfer is done: report it. The server answers both devices with peer:ended
 		// ('completed'), which marks it complete in endIncoming / endOutgoing.
 		receivedFiles.set(id, { audio: new Blob(chunks, { type: offer.file.type }), track });
@@ -681,9 +706,11 @@ export async function cancelIncoming(id: string) {
 
 /**
  * Keep a track once it has fully arrived: close the popup and add it to the library under the
- * sender's track ID and metadata. The cover is read from the audio file itself.
+ * sender's track ID and metadata. The cover is read from the audio file itself. If the library
+ * already has the track (`duplicate` on the transfer), `onDuplicate` says whether to keep both
+ * or replace the old one.
  */
-export async function confirmIncoming(id: string) {
+export async function confirmIncoming(id: string, onDuplicate?: DuplicateChoice) {
 	const transfer = get(incomingTransfers).find((t) => t.offer.id === id);
 	if (!transfer || !isReceived(transfer)) return;
 	const received = receivedFiles.get(id);
@@ -699,11 +726,18 @@ export async function confirmIncoming(id: string) {
 		const { importTransferredTrack } = await import('./library');
 		const result = await importTransferredTrack(
 			new File([audio], track.fileName, { type: audio.type }),
-			track
+			track,
+			transfer.duplicate ? onDuplicate : undefined
 		);
 		if (result === 'imported') {
 			recordIncoming(transfer, 'imported', undefined, track);
 			toast.success(`Added "${track.title}" to your library.`);
+		} else if (result === 'replaced') {
+			recordIncoming(transfer, 'imported', 'Replaced the copy in your library.', track);
+			toast.success(`Replaced "${track.title}" in your library.`);
+		} else if (result === 'kept-both') {
+			recordIncoming(transfer, 'imported', 'Added as a second copy.', track);
+			toast.success(`Added another copy of "${track.title}" to your library.`);
 		} else {
 			recordIncoming(transfer, 'imported', 'Already in your library.', track);
 			toast.info(`"${track.title}" is already in your library.`);

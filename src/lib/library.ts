@@ -10,6 +10,7 @@ import { writable } from 'svelte/store';
 import type { Song, Album, Artist, SongSource, TransferredTrackMetadata } from '$lib/types';
 import UserSettings from '$lib/preferences/usersettings';
 import { refreshLibrary } from '$lib/global.svelte';
+import { recentlyPlayedManager } from '$lib/store';
 import { statsManager } from '$lib/stats';
 
 declare global {
@@ -116,40 +117,75 @@ async function parseMetadataFast(file: File) {
 	return null;
 }
 
+/**
+ * What to do with a transferred track the library already has. keep-both: add it alongside the
+ * one already there. replace: add it, then delete the old one (it takes the old one's place in
+ * playlists). Replacing a track from a linked folder only removes it from the library: its file
+ * stays in the folder.
+ */
+export type DuplicateChoice = 'keep-both' | 'replace';
+
+/**
+ * The library track a transferred one would duplicate, wherever it lives (stored by Maple or in a
+ * linked folder): one with the same ID, or else one with the same title and artist, preferring a
+ * copy Maple stores itself.
+ */
+function findDuplicate(tracks: Song[], metadata: Pick<Song, 'id' | 'title' | 'artist'>) {
+	const matches = tracks.filter((t) => t.title === metadata.title && t.artist === metadata.artist);
+	return (
+		tracks.find((t) => t.id === metadata.id) ??
+		matches.find((t) => t.source?.kind !== 'linked-folder') ??
+		matches[0]
+	);
+}
+
+/** The track already in the library that `metadata` would duplicate, if any. */
+export async function findDuplicateTrack(
+	metadata: Pick<Song, 'id' | 'title' | 'artist'>
+): Promise<Song | undefined> {
+	return findDuplicate(await OPFS.get().tracks(), metadata);
+}
+
+/**
+ * Add a track another device sent. If the library already has it (see findDuplicateTrack),
+ * `onDuplicate` says what to do; without it nothing is added and 'already-exists' is returned.
+ */
 export async function importTransferredTrack(
 	audio: File,
 	metadata: TransferredTrackMetadata,
+	onDuplicate?: DuplicateChoice,
 	artwork?: Blob
-): Promise<'imported' | 'already-exists'> {
+): Promise<'imported' | 'kept-both' | 'replaced' | 'already-exists'> {
 	if (!isUuid(metadata.id) || !/^[a-z0-9]{1,10}$/i.test(metadata.ext)) {
 		throw new Error('Invalid track ID or file extension.');
 	}
 
-	return OPFS.withImportLock(() => saveTransferredTrack(audio, metadata, artwork));
+	return OPFS.withImportLock(() => saveTransferredTrack(audio, metadata, onDuplicate, artwork));
 }
 
 async function saveTransferredTrack(
 	audio: File,
 	metadata: TransferredTrackMetadata,
+	onDuplicate?: DuplicateChoice,
 	artwork?: Blob
-): Promise<'imported' | 'already-exists'> {
-	if (await OPFS.get().track(metadata.id)) return 'already-exists';
+): Promise<'imported' | 'kept-both' | 'replaced' | 'already-exists'> {
+	const tracks = await OPFS.get().tracks();
+	const duplicate = findDuplicate(tracks, metadata);
+	if (duplicate && !onDuplicate) return 'already-exists';
 
-	if (await OPFS.hasTrack(metadata.title, metadata.artist)) { //TODO: later I want to show a screen that lets the user choose whether to overwrite or import a duplicate
-		throw new Error('A track with this title and artist already has a different ID.');
-	}
 	const picture = artwork ? undefined : (await parseMetadataFast(audio))?.common.picture?.[0];
 	const cover = artwork ?? (picture
 		? new Blob([picture.data.slice()], { type: picture.format })
 		: await (await fetch('/placeholder.png')).blob());
 
-	const track: Song = { ...metadata, image: cover, source: { kind: 'opfs' } };
+	const id = tracks.some((t) => t.id === metadata.id) ? uuidv4() : metadata.id;
+	const track: Song = { ...metadata, id, image: cover, source: { kind: 'opfs' } };
 	const storedAudio = new File([audio], `track.${track.ext}`, { type: audio.type });
 
 	try {
 		await OPFS.addFile(track.id, storedAudio);
 
-		if (!(await OPFS.addTrack(track))) {
+		if (!(await OPFS.addTrack(track, !!duplicate))) {
 			throw new Error('A track with this title and artist already exists.');
 		}
 
@@ -169,8 +205,19 @@ async function saveTransferredTrack(
 	}
 
 	statsManager.recordLibraryAdd(track.id);
+	if (duplicate && onDuplicate === 'replace') {
+		try {
+			await OPFS.replaceTrack(duplicate, track.id);
+			recentlyPlayedManager.remove(duplicate.id);
+		} catch (error) {
+			await refreshLibrary();
+			const reason = error instanceof Error ? error.message : String(error);
+			throw new Error(`It was added, but the old copy couldn't be removed (${reason}).`);
+		}
+	}
 	await refreshLibrary();
-	return 'imported';
+	if (!duplicate) return 'imported';
+	return onDuplicate === 'replace' ? 'replaced' : 'kept-both';
 }
 
 type LibraryFile = { file: File; source: SongSource } | { handle: FileSystemFileHandle; source: SongSource };

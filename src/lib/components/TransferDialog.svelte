@@ -63,6 +63,8 @@
 		done: boolean;
 		/** Waiting for the server to confirm a cancel. */
 		cancelling: boolean;
+		/** Incoming only: the library already has this track (see IncomingTransfer). */
+		duplicate?: { title: string; artist: string; linked: boolean };
 		error?: string;
 	}
 
@@ -81,6 +83,7 @@
 				bytes: incoming.received,
 				done: isReceived(incoming),
 				cancelling: !!incoming.cancelling,
+				duplicate: incoming.duplicate,
 				error: incoming.error
 			};
 		}
@@ -141,7 +144,7 @@
 			? ['', '']
 			: incoming
 				? current.done
-					? ['Received from ', '. Keep it?']
+					? ['Received from ', current.duplicate ? '.' : '. Keep it?']
 					: current.bytes === 0
 						? ['Waiting for ', ' to start sending…']
 						: ['Receiving from ', '…']
@@ -355,6 +358,17 @@
 						>
 					</div>
 				</div>
+				{#if incoming && shown.done && shown.duplicate}
+					<p class="text-on-surface-variant text-sm">
+						You already have <span class="text-on-surface font-semibold"
+							>{shown.duplicate.title}</span
+						>{shown.duplicate.artist ? ` by ${shown.duplicate.artist}` : ''}. Keep both, or
+						replace the one you have? Replacing keeps its place in your playlists{shown.duplicate
+							.linked
+							? ', and removes the old one from your library but not from its linked folder'
+							: ''}.
+					</p>
+				{/if}
 			{:else if shown.status === 'cancelled'}
 				<p class="text-on-surface-variant">{shown.error}</p>
 			{:else if shown.status === 'failed'}
@@ -466,16 +480,31 @@
 			<!-- Cancel works until the transfer completes; after that the sender has nothing left
 			     to cancel, while the receiver can still throw the file away. The other button only
 			     works once it completes. Both wait while the server confirms a cancel. -->
-			{#if incoming || !current.done}
-				<Button variant="text" disabled={current.cancelling} onclick={() => cancel(id)}
-					>{current.cancelling ? 'Canceling…' : 'Cancel'}</Button
+			{#if incoming && current.done && current.duplicate}
+				<!-- The library already has this track: throw this one away, add it as a second copy,
+				     or swap it in for the old one. -->
+				{@const busy = current.cancelling}
+				<Button variant="text" disabled={busy} onclick={() => cancel(id)}
+					>{busy ? 'Discarding…' : 'Discard'}</Button
+				>
+				<Button variant="tonal" disabled={busy} onclick={() => confirmIncoming(id, 'keep-both')}
+					>Keep both</Button
+				>
+				<Button variant="filled" disabled={busy} onclick={() => confirmIncoming(id, 'replace')}
+					>Replace</Button
+				>
+			{:else}
+				{#if incoming || !current.done}
+					<Button variant="text" disabled={current.cancelling} onclick={() => cancel(id)}
+						>{current.cancelling ? 'Canceling…' : 'Cancel'}</Button
+					>
+				{/if}
+				<Button
+					variant="filled"
+					disabled={!current.done || current.cancelling}
+					onclick={() => finish(id)}>{incoming ? 'Confirm' : 'Done'}</Button
 				>
 			{/if}
-			<Button
-				variant="filled"
-				disabled={!current.done || current.cancelling}
-				onclick={() => finish(id)}>{incoming ? 'Confirm' : 'Done'}</Button
-			>
 		{:else if current}
 			<Button variant="text" onclick={close}>Close</Button>
 		{:else if picking}
