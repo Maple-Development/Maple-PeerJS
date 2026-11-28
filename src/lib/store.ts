@@ -11,6 +11,11 @@ export type QueueSource = 'none' | 'album' | 'playlist' | 'artist' | 'tracks' | 
 
 export const pendingRequests = writable<FriendRequests>({ incoming: [], outgoing: [] });
 export const friends = writable<Friend[]>([]);
+/**
+ * The Social page's open tab. Set it before going to /friends to open a tab other than Friends;
+ * the page sets it back to Friends when it's left.
+ */
+export const socialTab = writable<'friends' | 'transfers'>('friends');
 export const isLoggedIn = writable(false);
 /** The "socket" preference. socketManager connects or disconnects whenever it changes. */
 export const socketEnabled = writable(UserSettings.preferences.socket);
